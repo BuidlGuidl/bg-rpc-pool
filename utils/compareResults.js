@@ -165,12 +165,12 @@ function _compareResultsInternal(responseMap, poolMap, method, result) {
       result.mismatchedResults = [`result: ${safeStringify(mismatchedResponse.data)}`];
       
       // Send Telegram alert for simple value mismatch
-      const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node: ${result.mismatchedNode}\nNode Owner: ${result.mismatchedOwner}\nMismatch Details: ${result.mismatchedResults.join('\n')}`;
-      try {
-        sendTelegramAlert(alertMessage);
-      } catch (telegramError) {
-        console.error("❌ Error sending telegram alert:", telegramError.message);
-      }
+      // const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node: ${result.mismatchedNode}\nNode Owner: ${result.mismatchedOwner}\nMismatch Details: ${result.mismatchedResults.join('\n')}`;
+      // try {
+      //   sendTelegramAlert(alertMessage);
+      // } catch (telegramError) {
+      //   console.error("❌ Error sending telegram alert:", telegramError.message);
+      // }
     } else {
       result.resultsMatch = true;
     }
@@ -227,12 +227,12 @@ function _compareResultsInternal(responseMap, poolMap, method, result) {
       result.mismatchedResults = [`result: ${safeStringify(mismatchedResponse.data)}`];
       
       // Send Telegram alert for array mismatch
-      const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node: ${result.mismatchedNode}\nNode Owner: ${result.mismatchedOwner}\nMismatch Details: ${result.mismatchedResults.join('\n')}`;
-      try {
-        sendTelegramAlert(alertMessage);
-      } catch (telegramError) {
-        console.error("❌ Error sending telegram alert:", telegramError.message);
-      }
+      // const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node: ${result.mismatchedNode}\nNode Owner: ${result.mismatchedOwner}\nMismatch Details: ${result.mismatchedResults.join('\n')}`;
+      // try {
+      //   sendTelegramAlert(alertMessage);
+      // } catch (telegramError) {
+      //   console.error("❌ Error sending telegram alert:", telegramError.message);
+      // }
     } else {
       result.resultsMatch = true;
     }
@@ -271,12 +271,12 @@ function _compareResultsInternal(responseMap, poolMap, method, result) {
           `Other nodes have keys: [${[...firstKeySet].sort().join(', ')}]`
         ];
         
-        const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node: ${result.mismatchedNode}\nNode Owner: ${result.mismatchedOwner}\nMismatch Details:\n${result.mismatchedResults.join('\n')}`;
-        try {
-          sendTelegramAlert(alertMessage);
-        } catch (telegramError) {
-          console.error("❌ Error sending telegram alert:", telegramError.message);
-        }
+        // const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node: ${result.mismatchedNode}\nNode Owner: ${result.mismatchedOwner}\nMismatch Details:\n${result.mismatchedResults.join('\n')}`;
+        // try {
+        //   sendTelegramAlert(alertMessage);
+        // } catch (telegramError) {
+        //   console.error("❌ Error sending telegram alert:", telegramError.message);
+        // }
         return result;
       }
     }
@@ -374,12 +374,12 @@ function _compareResultsInternal(responseMap, poolMap, method, result) {
     });
 
     // Send Telegram alert for object mismatch
-    const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node(s): ${result.mismatchedNode}\nNode Owner(s): ${result.mismatchedOwner}\nMismatch Details:\n${result.mismatchedResults.join('\n')}`;
-    try {
-      sendTelegramAlert(alertMessage);
-    } catch (telegramError) {
-      console.error("❌ Error sending telegram alert:", telegramError.message);
-    }
+    // const alertMessage = `\n------------------------------------------\n🚨 RPC Response Mismatch Detected!\n\nMethod: ${method}\nMismatched Node(s): ${result.mismatchedNode}\nNode Owner(s): ${result.mismatchedOwner}\nMismatch Details:\n${result.mismatchedResults.join('\n')}`;
+    // try {
+    //   sendTelegramAlert(alertMessage);
+    // } catch (telegramError) {
+    //   console.error("❌ Error sending telegram alert:", telegramError.message);
+    // }
   } else {
     result.resultsMatch = true;
   }
