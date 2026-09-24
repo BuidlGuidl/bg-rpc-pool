@@ -173,7 +173,13 @@ const io = new Server(wsServer, {
     methods: ["GET", "POST"]
   },
   pingInterval: wsHeartbeatInterval,
-  pingTimeout: wsHeartbeatInterval * 2
+  pingTimeout: wsHeartbeatInterval * 2,
+  // Per-message ceiling (default 1 MB); exceeding it disconnects the node. Must stay
+  // above the node client's 32 MB maxContentLength so oversized responses surface
+  // there as a JSON-RPC error instead. Applies to the uncompressed size.
+  maxHttpBufferSize: 64e6,
+  // Node clients already offer permessage-deflate; ~10x on logs and receipts
+  perMessageDeflate: { threshold: 1024 }
 });
 
 // Create HTTP server for the API endpoint (no SSL)
