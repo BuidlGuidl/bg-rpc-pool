@@ -15,6 +15,8 @@ const { constructNodeContinentsObject, getNodeContinentsObject } = require('./ut
 const { getRpcSiteStatsObject } = require('./utils/getRpcSiteStatsObject');
 const { getYourNodesObject } = require('./utils/getYourNodesObject');
 const { selectRandomClients } = require('./utils/selectRandomClients');
+const { selectHeavyClient, getHeavyStatus } = require('./utils/selectHeavyClient');
+const heavyInFlight = require('./utils/heavyInFlight');
 const { fetchNodeTimingData } = require('./utils/nodeTimingUtils');
 const { handleRequestSingle } = require('./utils/handleRequestSingle');
 const { handleRequestSet } = require('./utils/handleRequestSet');
@@ -26,7 +28,7 @@ const { getBlockNumberMode } = require('./utils/getBlockNumberMode');
 const { sendTelegramAlert } = require('./utils/telegramUtils');
 const { isMachineIdSuspicious, extractMacAddressFromMachineId, getSuspiciousMacAddresses, reloadSuspiciousMacAddresses } = require('./utils/suspiciousMacChecker');
 
-const { portPoolPublic, poolPort, wsHeartbeatInterval, requestSetChance, nodeTimingFetchInterval, poolNodeStaleThreshold, methodsToSkipComparison, cacheableMethods } = require('./config');
+const { portPoolPublic, poolPort, wsHeartbeatInterval, requestSetChance, nodeTimingFetchInterval, poolNodeStaleThreshold, methodsToSkipComparison, cacheableMethods, heavyMethods } = require('./config');
 
 const poolMap = new Map();
 
@@ -197,6 +199,16 @@ const wsServerInternal = require('https').createServer(
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   
+  if (req.url === '/getlogsStatus' && req.method === 'GET') {
+    const response = JSON.stringify(getHeavyStatus(poolMap));
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(response)
+    });
+    res.end(response);
+    return;
+  }
+
   if (req.url === '/poolNodes' && req.method === 'GET') {
     try {      
       const poolNodes = getPoolNodesObject(poolMap);
@@ -450,6 +462,21 @@ const wsServerInternal = require('https').createServer(
 
         try {
           let result;
+
+          // getLogs and filter methods: one eligible reth node, no retry, no comparison, not cached
+          const heavyConfig = heavyMethods[rpcRequest.method];
+          if (heavyConfig) {
+            const selection = selectHeavyClient(poolMap, rpcRequest, heavyConfig);
+            result = selection.error
+              ? { status: 'error', data: selection.error }
+              : await handleRequestSingle(rpcRequest, [selection.socketId], poolMap, io, heavyConfig);
+
+            res.statusCode = result.status === 'success' ? 200 : 500;
+            res.end(JSON.stringify(result.status === 'success'
+              ? { jsonrpc: "2.0", result: result.data, id: rpcRequest.id }
+              : { jsonrpc: "2.0", error: result.data, id: rpcRequest.id }));
+            return;
+          }
 
           const selectedClients = selectRandomClients(poolMap);
           console.log(`Selected clients: ${selectedClients}`);
@@ -754,6 +781,7 @@ io.on('connection', (socket) => {
     }
     poolMap.delete(socket.id);
     suspiciousNodes.delete(socket.id);
+    heavyInFlight.releaseSocket(socket.id);
   });
 });
 

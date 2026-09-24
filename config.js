@@ -8,9 +8,22 @@ const nodeMethodSpecificTimeouts = {
   'eth_getBlockReceipts': 2000,
   'eth_getBlockByNumber': 1500,
   'eth_getBlockByHash': 1500,
-  'eth_getLogs': 10000,
+  'eth_getLogs': 10000, // only used if heavyMethods is rolled back to {}
   'eth_getTransactionReceipt': 2000,
 };
+
+// getLogs and filter methods: reth-only routing with a receipt-floor check, a per-node
+// in-flight cap, one node (no retry, no comparison), and their own timeout. Timeouts are
+// logged as `timeout_error_heavy` so they don't count against node ratings in bg-rpc-logs.
+// Rollback: set to {} and these methods take the normal path again.
+const heavyMethods = {
+  eth_getLogs:          { timeout: 5000, retry: false, maxPerNode: 4 },
+  eth_getFilterLogs:    { timeout: 5000, retry: false, maxPerNode: 4 },
+  eth_newFilter:        { timeout: 3000, retry: false, maxPerNode: 4 },
+  eth_getFilterChanges: { timeout: 3000, retry: false, maxPerNode: 4 },
+};
+const heavyInFlightMaxAge = 120000; // Drop in-flight entries whose response never came back (ms)
+
 const pointUpdateInterval = 10000;
 // const requestSetChance = 5; // 1 in n requests will be a set request
 const requestSetChance = 20; // 1 in n requests will be a set request
@@ -49,6 +62,9 @@ const methodsToSkipComparison = [
   'eth_maxPriorityFeePerGas', // Current priority fee (varies by block)
   'eth_feeHistory',           // Fee history (can show different latest blocks)
   
+  // Range queries (also routed by heavyMethods; listed here so a rollback of that never compares)
+  'eth_getLogs',
+
   // Methods that might have transient differences
   'eth_getFilterChanges',     // Filter-specific, stateful
   'eth_getFilterLogs',        // Filter-specific, stateful
@@ -101,6 +117,8 @@ module.exports = {
   wsHeartbeatInterval,
   nodeDefaultTimeout,
   nodeMethodSpecificTimeouts,
+  heavyMethods,
+  heavyInFlightMaxAge,
   pointUpdateInterval,
   requestSetChance,
   spotCheckOnlyThreshold,
