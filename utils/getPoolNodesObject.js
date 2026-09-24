@@ -10,6 +10,7 @@
  *   - Version control info (git_branch, last_commit, commit_hash)
  *   - Network addresses (enode, peerid, enr)
  *   - Port configuration (consensus_tcp_port, consensus_udp_port)
+ *   - getLogs readiness (receipt_floor; reth nodes only, null if not reported)
  *   - Connection info (socket_id)
  *   - Ownership (owner)
  */
@@ -35,6 +36,8 @@ function getPoolNodesObject(poolMap) {
       enr: client.enr || '',
       consensus_tcp_port: client.consensus_tcp_port || '',
       consensus_udp_port: client.consensus_udp_port || '',
+      // Lowest block with receipts (reth only). null = not reported; 0 is a valid floor, so no `||`
+      receipt_floor: client.receipt_floor ?? null,
       socket_id: {
         id: client.wsID || ''
       },

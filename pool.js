@@ -757,28 +757,28 @@ let lastProcessedDay = -1;
 
 // New interval function that uses the system clock for scheduling
 // don't delete this
-setInterval(async () => {
-  const now = new Date();
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
-  const seconds = now.getSeconds();
-  const dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / (1000 * 60 * 60 * 24));
+// setInterval(async () => {
+//   const now = new Date();
+//   const hours = now.getHours();
+//   const minutes = now.getMinutes();
+//   const seconds = now.getSeconds();
+//   const dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / (1000 * 60 * 60 * 24));
 
-  // At the top of every hour (minutes === 0 and within first 3 seconds for safety)
-  if (minutes === 0 && seconds <= 2 && lastProcessedHour !== hours) {
-    lastProcessedHour = hours;
-    await processNodesForBread(poolMap);
-    console.log(`🍞 Bread processing at top of hour: ${now.toISOString()}`);
+//   // At the top of every hour (minutes === 0 and within first 3 seconds for safety)
+//   if (minutes === 0 && seconds <= 2 && lastProcessedHour !== hours) {
+//     lastProcessedHour = hours;
+//     await processNodesForBread(poolMap);
+//     console.log(`🍞 Bread processing at top of hour: ${now.toISOString()}`);
 
-    // At the start of each day (hours === 0)
-    if (hours === 0 && lastProcessedDay !== dayOfYear) {
-      lastProcessedDay = dayOfYear;
-      console.log('🍞 Start of day, calling mintBread()');
-      try {
-        await mintBread();
-      } catch (error) {
-        console.error('Error in mintBread:', error);
-      }
-    }
-  }
-}, 1000);
+//     // At the start of each day (hours === 0)
+//     if (hours === 0 && lastProcessedDay !== dayOfYear) {
+//       lastProcessedDay = dayOfYear;
+//       console.log('🍞 Start of day, calling mintBread()');
+//       try {
+//         await mintBread();
+//       } catch (error) {
+//         console.error('Error in mintBread:', error);
+//       }
+//     }
+//   }
+// }, 1000);
