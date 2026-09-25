@@ -12,7 +12,8 @@ function resolveFromBlock(rpcRequest) {
   // Filter follow-ups carry only a filter id; the range was checked when the filter was created
   if (method !== 'eth_getLogs' && method !== 'eth_newFilter') return { fromBlock: null };
 
-  const filter = Array.isArray(params) ? params[0] : undefined;
+  // Positional ([filter]) or by-name ({ filter }) params; reth accepts both
+  const filter = Array.isArray(params) ? params[0] : params?.filter;
   // Malformed: let reth reject it with its own -32602
   if (!filter || typeof filter !== 'object') return { fromBlock: null };
   // blockHash (D11): reth answers a hash below its floor with -32001, never a silent []
@@ -94,7 +95,10 @@ function selectHeavyClient(poolMap, rpcRequest, heavyConfig) {
 
 /**
  * Readiness summary for /getlogsStatus: a ready node is a checked-in reth node with a known
- * receipt floor; receiptFloor is the highest floor among them (conservative).
+ * receipt floor. receiptFloor is the LOWEST floor among them: the oldest block any ready node
+ * can serve. The edge rejects only ranges below it; selection then keeps just the nodes whose
+ * floor covers each request (D14). receiptFloorAll is the highest floor: history every ready
+ * node can serve.
  */
 function getHeavyStatus(poolMap) {
   const ready = Array.from(poolMap.values()).filter(c =>
@@ -103,7 +107,8 @@ function getHeavyStatus(poolMap) {
     Number.isFinite(c.receipt_floor));
   return {
     readyNodes: ready.length,
-    receiptFloor: ready.length > 0 ? Math.max(...ready.map(c => c.receipt_floor)) : null,
+    receiptFloor: ready.length > 0 ? Math.min(...ready.map(c => c.receipt_floor)) : null,
+    receiptFloorAll: ready.length > 0 ? Math.max(...ready.map(c => c.receipt_floor)) : null,
     inFlight: heavyInFlight.total(),
   };
 }
