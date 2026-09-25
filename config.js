@@ -17,7 +17,10 @@ const routingMode = 'pipeline';
 //            ({ maxPerNode }); timeouts are logged as `timeout_error_heavy`, so they don't
 //            count against node ratings in bg-rpc-logs
 //   disabled answer -32601 without touching a node
-const defaultMethodProfile = { timeout: nodeDefaultTimeout, retry: true, compare: true };
+//   cost     weight of one request in a node's in-flight load (Phase 3b-2): a number, or
+//            'range' = 1 + ceil(blocks / 1000) for getLogs (10k blocks = 11). Starting values,
+//            to be tuned with data
+const defaultMethodProfile = { timeout: nodeDefaultTimeout, retry: true, compare: true, cost: 1 };
 
 // Constant or node-specific answers, or "latest" state that legitimately differs between
 // nodes on different blocks: never compared
@@ -27,7 +30,7 @@ const noCompare = { compare: false };
 // node that created it, and with several nodes the follow-up call usually lands elsewhere.
 // Their routing settings are kept, so deleting `disabled` re-enables them as before.
 const methodProfiles = {
-  eth_getBlockReceipts:      { timeout: 2000 },
+  eth_getBlockReceipts:      { timeout: 2000, cost: 2 },
   eth_getBlockByNumber:      { timeout: 1500 },
   eth_getBlockByHash:        { timeout: 1500 },
   eth_getTransactionReceipt: { timeout: 2000 },
@@ -58,10 +61,10 @@ const methodProfiles = {
   txpool_inspect:            noCompare,
 
   // Range queries
-  eth_getLogs:               { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 } },
+  eth_getLogs:               { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, cost: 'range' },
 
   // Filter methods (disabled, D15)
-  eth_getFilterLogs:         { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, disabled: true },
+  eth_getFilterLogs:         { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, cost: 'range', disabled: true },
   eth_newFilter:             { timeout: 3000, retry: false, compare: false, heavy: { maxPerNode: 4 }, disabled: true },
   eth_getFilterChanges:      { timeout: 3000, retry: false, compare: false, heavy: { maxPerNode: 4 }, disabled: true },
   eth_newBlockFilter:        { compare: false, disabled: true },
@@ -78,11 +81,15 @@ const heavyMethods = Object.fromEntries(profileEntries.filter(([, p]) => p.heavy
   .map(([method, p]) => [method, { timeout: p.timeout, retry: p.retry, maxPerNode: p.heavy.maxPerNode }]));
 const disabledMethods = profileEntries.filter(([, p]) => p.disabled).map(([method]) => method);
 
-const heavyInFlightMaxAge = 120000; // Drop in-flight entries whose response never came back (ms)
+const heavyInFlightMaxAge = 120000; // Drop in-flight entries (all methods) whose response never came back (ms)
 
 const pointUpdateInterval = 10000;
 // const requestSetChance = 5; // 1 in n requests will be a set request
 const requestSetChance = 20; // 1 in n requests will be a set request
+// Slow nodes (timeout rate > spotCheckOnlyThreshold) never serve a request on their own
+// (getLogs plan D13). With this on, up to 2 of them join a 1-in-requestSetChance comparison set
+// next to a fast node, so a recovered node can earn its way back. Light methods only.
+const slowSpotChecks = true;
 const spotCheckOnlyThreshold = 0.05; // The timeout percentage threshold (0-1) that excludes nodes from handling single requests (e.g., 0.5 = 50% timeout rate)
 const nodeTimingFetchInterval = 60 * 60 * 1000; // Interval for fetching node timeout data (1 hour)
 const poolNodeStaleThreshold = 5 * 60 * 1000; // 5 minutes Timeout threshold for stale nodes in poolMap
@@ -135,6 +142,7 @@ module.exports = {
   heavyInFlightMaxAge,
   pointUpdateInterval,
   requestSetChance,
+  slowSpotChecks,
   spotCheckOnlyThreshold,
   nodeTimingFetchInterval,
   poolNodeStaleThreshold,

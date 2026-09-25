@@ -6,6 +6,7 @@
  * @param {Array} selectedSocketIds - Array of socket IDs to send the request to
  * @param {Map} poolMap - Map containing all connected clients 
  * @param {Object} io - Socket.IO instance
+ * @param {number} [cost=1] - weight of this request in each node's in-flight load (Phase 3b-2)
  * @returns {Promise<Object>} - Promise resolving to the result of the RPC request
  */
 const { logNode } = require('./logNode');
@@ -14,8 +15,9 @@ const { logCompareResults } = require('./logCompareResults');
 const { ignoredErrorCodes } = require('../../shared/ignoredErrorCodes');
 
 const { nodeDefaultTimeout, nodeMethodSpecificTimeouts } = require('../config');
+const nodeLoad = require('./nodeLoad');
 
-async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io) {
+async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io, cost = 1) {
   const startTime = Date.now();
   const utcTimestamp = new Date().toISOString();
 
@@ -79,6 +81,9 @@ async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io) {
         return; // Skip this client
       }
 
+      // Counts against the node until it answers (even late) or disconnects (Phase 3b-2)
+      const loadToken = nodeLoad.acquire(client.id, client.wsID, { cost });
+
       // Set up timeout for each client
       const timeoutId = setTimeout(() => {
         if (!receivedResponseMap.get(clientId)) {  // Only timeout if we haven't received a response
@@ -117,6 +122,8 @@ async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io) {
 
       // Send the request to each client
       socket.emit('rpc_request', rpcRequest, async (response) => {
+        nodeLoad.release(client.id, loadToken);
+
         if (receivedResponseMap.get(clientId)) {
           // This is a late response after timeout, ignore it
           return;

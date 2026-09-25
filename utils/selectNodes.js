@@ -1,11 +1,13 @@
-const { spotCheckOnlyThreshold, requestSetChance, defaultMethodProfile, methodProfiles } = require('../config');
+const { spotCheckOnlyThreshold, requestSetChance, slowSpotChecks, defaultMethodProfile, methodProfiles } = require('../config');
 const { getNodeTimingData } = require('./nodeTimingUtils');
-const heavyInFlight = require('./heavyInFlight');
+const nodeLoad = require('./nodeLoad');
 
 // One selection function for every method (getLogs plan Phase 3b). select() is pure: it takes a
 // snapshot of the pool and returns a decision without sending anything, so it can be tested
-// with fake pools. Step 3b-1 reproduces the pre-3b behavior exactly, including the order in
-// which random numbers are drawn; later steps change behavior in one place here.
+// with fake pools. Rules (3b-3):
+//   - only fast nodes serve a request (D13); slow ones only join comparison sets as spot checks
+//   - only nodes at the exact highest block among fast nodes (owner decision 2026-09-25)
+//   - among those, power of two choices on weighted in-flight load (nodeLoad, 3b-2)
 
 const TAGS_AT_HEAD = ['latest', 'safe', 'finalized']; // always above any node's receipt floor
 
@@ -40,6 +42,34 @@ function resolveFromBlock(rpcRequest) {
   return { fromBlock: null }; // Malformed: reth rejects it
 }
 
+const MAX_RANGE_BLOCKS = 10000; // the edge's range cap (D1); reth rejects larger ranges anyway
+
+// Block number for a range bound: tags at the head count as the head
+function toBlockNumber(value, head) {
+  if (value === undefined || TAGS_AT_HEAD.includes(value)) return head;
+  if (value === 'earliest') return 0;
+  if (typeof value === 'string' && /^0x[0-9a-fA-F]+$/.test(value)) return parseInt(value, 16);
+  return null;
+}
+
+/**
+ * Weight of one request in a node's in-flight load (profile `cost`; Phase 3b-2).
+ * 'range' (getLogs) = 1 + ceil(blocks / 1000), blocks capped at 10,000; a blockHash or an
+ * unreadable range counts as 1 block.
+ */
+function requestCost(rpcRequest, profile, head) {
+  if (profile.cost !== 'range') return profile.cost;
+  const { params } = rpcRequest;
+  const filter = Array.isArray(params) ? params[0] : params?.filter;
+  let blocks = 1;
+  if (filter && typeof filter === 'object' && filter.blockHash === undefined && Number.isFinite(head)) {
+    const from = toBlockNumber(filter.fromBlock, head);
+    const to = toBlockNumber(filter.toBlock, head);
+    if (from !== null && to !== null) blocks = Math.min(Math.max(to - from + 1, 1), MAX_RANGE_BLOCKS);
+  }
+  return 1 + Math.ceil(blocks / 1000);
+}
+
 function hasValidBlock(client) {
   const blockNum = client.block_number;
   return blockNum !== undefined && blockNum !== null && blockNum !== "N/A" && !isNaN(parseInt(blockNum));
@@ -65,22 +95,42 @@ function isFast(client, timing) {
 }
 
 /**
+ * Power of two choices: draw two different candidates at random and keep the one with the lower
+ * weighted load (ties keep the first drawn). Nearly as even as always taking the least-loaded
+ * node, without sending everything to a node that fails instantly and so always looks idle.
+ */
+function powerOfTwo(candidates, loads, random) {
+  if (candidates.length === 1) return candidates[0];
+  const i = Math.floor(random() * candidates.length);
+  let j = Math.floor(random() * (candidates.length - 1));
+  if (j >= i) j++;
+  const a = candidates[i];
+  const b = candidates[j];
+  return (loads[b.id] || 0) < (loads[a.id] || 0) ? b : a;
+}
+
+/**
  * Captures what select() needs from live state.
  * @param {Map<string, Object>} poolMap
  */
 function takeSnapshot(poolMap) {
   const nodes = Array.from(poolMap.values());
   const heavyCounts = {};
-  for (const c of nodes) if (c.id) heavyCounts[c.id] = heavyInFlight.count(c.id);
-  return { nodes, timing: getNodeTimingData(), heavyCounts };
+  const loads = {};
+  for (const c of nodes) {
+    if (!c.id) continue;
+    heavyCounts[c.id] = nodeLoad.heavyCount(c.id);
+    loads[c.id] = nodeLoad.load(c.id);
+  }
+  return { nodes, timing: getNodeTimingData(), heavyCounts, loads };
 }
 
 /**
  * Decides which node(s) serve a request.
  * @param {Object} rpcRequest
- * @param {{ nodes: Object[], timing: Object|null, heavyCounts: Object, random?: Function }} snapshot
+ * @param {{ nodes: Object[], timing: Object|null, heavyCounts: Object, loads?: Object, random?: Function }} snapshot
  * @returns {{ error: Object, reason: string } |
- *           { socketIds: string[], handler: 'single'|'set', heavy: Object|null, reason: string }}
+ *           { socketIds: string[], handler: 'single'|'set', heavy: Object|null, cost: number, reason: string }}
  */
 function select(rpcRequest, snapshot) {
   const profile = getProfile(rpcRequest.method);
@@ -92,9 +142,14 @@ function select(rpcRequest, snapshot) {
       reason: 'disabled',
     };
   }
-  return profile.heavy
+  const decision = profile.heavy
     ? selectHeavy(rpcRequest, profile, snapshot, random)
     : selectLight(rpcRequest, profile, snapshot, random);
+  if (!decision.error) {
+    const heads = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c)).map(c => parseInt(c.block_number));
+    decision.cost = requestCost(rpcRequest, profile, heads.length > 0 ? Math.max(...heads) : null);
+  }
+  return decision;
 }
 
 // getLogs: one node that is reth, knows its floor, covers the range and has capacity
@@ -110,25 +165,25 @@ function selectHeavy(rpcRequest, profile, snapshot, random) {
   const reth = checkedIn.filter(isReth);
   const floorKnown = reth.filter(c => Number.isFinite(c.receipt_floor));
   const coversRange = fromBlock === null ? floorKnown : floorKnown.filter(c => c.receipt_floor <= fromBlock);
-  const withCapacity = coversRange.filter(c => (snapshot.heavyCounts[c.id] || 0) < profile.heavy.maxPerNode);
+  // Only fast nodes serve (D13), then capacity, then the exact highest block, then power of two
+  const fastCovering = coversRange.filter(c => isFast(c, snapshot.timing));
+  const withCapacity = fastCovering.filter(c => (snapshot.heavyCounts[c.id] || 0) < profile.heavy.maxPerNode);
+  const loads = snapshot.loads || {};
+  const targetBlock = withCapacity.length > 0 ? Math.max(...withCapacity.map(c => parseInt(c.block_number))) : null;
+  const atHead = withCapacity.filter(c => parseInt(c.block_number) === targetBlock);
+  const picked = atHead.length > 0 ? powerOfTwo(atHead, loads, random) : null;
 
-  // Preferences, not requirements: fast nodes first, then those at the highest block
-  const fast = withCapacity.filter(c => isFast(c, snapshot.timing));
-  const preferred = fast.length > 0 ? fast : withCapacity;
-  const targetBlock = preferred.length > 0 ? Math.max(...preferred.map(c => parseInt(c.block_number))) : null;
-  const atHead = preferred.filter(c => parseInt(c.block_number) === targetBlock);
-  const picked = atHead.length > 0 ? atHead[Math.floor(random() * atHead.length)] : null;
-
-  if (preferred.length > 0) {
-    const within1 = preferred.filter(c => parseInt(c.block_number) >= targetBlock - 1).length;
-    console.log(`🧭 heavy ${rpcRequest.method}: target ${targetBlock}, candidates ${preferred.length}, ` +
-      `at target ${atHead.length}, within 1 ${within1}, blocks [${preferred.map(c => targetBlock - parseInt(c.block_number)).sort((a, b) => a - b).join(',')}]`);
+  if (withCapacity.length > 0) {
+    const within1 = withCapacity.filter(c => parseInt(c.block_number) >= targetBlock - 1).length;
+    console.log(`🧭 heavy ${rpcRequest.method}: target ${targetBlock}, candidates ${withCapacity.length}, ` +
+      `at target ${atHead.length}, within 1 ${within1}, blocks [${withCapacity.map(c => targetBlock - parseInt(c.block_number)).sort((a, b) => a - b).join(',')}]`);
   }
   console.log(
     `🏋️ ${rpcRequest.method} from ${fromBlock === null ? 'n/a' : fromBlock}: ` +
     `${checkedIn.length} → ${reth.length} reth → ${floorKnown.length} floor known → ` +
-    `${coversRange.length} covers range → ${withCapacity.length} with capacity → ` +
-    (picked ? `picked ${picked.id}` : 'none')
+    `${coversRange.length} covers range → ${fastCovering.length} fast → ${withCapacity.length} with capacity → ` +
+    `${atHead.length} at block ${targetBlock} → ` +
+    (picked ? `picked ${picked.id} (load ${loads[picked.id] || 0}; loads [${atHead.map(c => loads[c.id] || 0).join(',')}])` : 'none')
   );
 
   const heavy = { timeout: profile.timeout, retry: profile.retry, maxPerNode: profile.heavy.maxPerNode };
@@ -142,90 +197,76 @@ function selectHeavy(rpcRequest, profile, snapshot, random) {
     const lowestFloor = Math.min(...floorKnown.map(c => c.receipt_floor));
     return { error: { code: -32602, message: `Logs older than block ${lowestFloor} are not available on this endpoint` }, reason: 'below floor' };
   }
+  if (fastCovering.length === 0) {
+    return { error: { code: -32005, message: `${rpcRequest.method} unavailable: no healthy nodes for this range, retry shortly` }, reason: 'only slow nodes' };
+  }
   return { error: { code: -32005, message: `${rpcRequest.method} capacity exhausted, retry shortly` }, reason: 'no capacity' };
 }
 
-// Everything else: up to 3 nodes at the highest block, fast first; slow nodes as spot checks;
-// 1-in-requestSetChance comparison across 3 nodes unless the profile says not to compare
+// Everything else: a fast node at the exact highest block chosen by power of two, plus a second
+// fast node as the retry target; 1-in-requestSetChance a comparison set of 3 (the chosen node,
+// other fast nodes and, as spot checks, up to 2 slow nodes) unless the profile says not to compare
 function selectLight(rpcRequest, profile, snapshot, random) {
   const { timing } = snapshot;
+  const loads = snapshot.loads || {};
+  const spotChecks = snapshot.slowSpotChecks ?? slowSpotChecks;
   const noClients = { error: { code: -69000, message: "No clients connected to pool" }, reason: 'no clients' };
 
   const clientsWithBlocks = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c));
   if (clientsWithBlocks.length === 0) return noClients;
+  const fastNodes = clientsWithBlocks.filter(c => isFast(c, timing));
+  if (fastNodes.length === 0) return { ...noClients, reason: 'only slow nodes' }; // D13
 
-  // Highest block among fast nodes (all nodes if none is fast or there's no timing data)
-  const fastWithBlocks = timing ? clientsWithBlocks.filter(c => isFast(c, timing)) : clientsWithBlocks;
-  const blockSource = fastWithBlocks.length > 0 ? fastWithBlocks : clientsWithBlocks;
-  const targetBlock = Math.max(...blockSource.map(c => parseInt(c.block_number)));
-  const highestBlockClients = clientsWithBlocks.filter(c => parseInt(c.block_number) === targetBlock);
+  // Exact highest block among fast nodes
+  const targetBlock = Math.max(...fastNodes.map(c => parseInt(c.block_number)));
+  const candidates = fastNodes.filter(c => parseInt(c.block_number) === targetBlock);
+  const slowAtTarget = clientsWithBlocks.filter(c => !isFast(c, timing) && parseInt(c.block_number) === targetBlock);
 
   const within1 = clientsWithBlocks.filter(c => parseInt(c.block_number) >= targetBlock - 1).length;
   console.log(`🧭 light: target ${targetBlock}, candidates ${clientsWithBlocks.length}, ` +
-    `at target ${highestBlockClients.length}, within 1 ${within1}, ` +
+    `at target ${candidates.length + slowAtTarget.length}, within 1 ${within1}, ` +
     `blocks [${clientsWithBlocks.map(c => targetBlock - parseInt(c.block_number)).sort((a, b) => a - b).join(',')}]`);
 
-  if (highestBlockClients.length === 0) return noClients;
+  const primary = powerOfTwo(candidates, loads, random);
+  const otherFast = candidates.filter(c => c !== primary);
 
-  let selectionPool = [...highestBlockClients];
-  let slowCount = 0;
-  if (timing) {
-    const fastNodes = highestBlockClients.filter(c => isFast(c, timing));
-    const slowNodes = highestBlockClients.filter(c => !isFast(c, timing));
-    if (fastNodes.length === 0) return noClients; // all nodes slow
-
-    selectionPool = [...fastNodes];
-    // Spot checks: up to 2 random slow nodes join the pool
-    if (slowNodes.length > 2) {
-      const availableSlowNodes = [...slowNodes];
-      for (let i = 0; i < 2; i++) {
-        const randomIndex = Math.floor(random() * availableSlowNodes.length);
-        selectionPool.push(availableSlowNodes[randomIndex]);
-        availableSlowNodes.splice(randomIndex, 1);
-      }
-      slowCount = 2;
-    } else {
-      selectionPool.push(...slowNodes);
-      slowCount = slowNodes.length;
-    }
-  }
-
-  // Up to 3 random nodes from the pool
-  const numToSelect = Math.min(3, selectionPool.length);
-  const selectedNodes = [];
-  const availableNodes = [...selectionPool];
-  for (let i = 0; i < numToSelect; i++) {
-    const randomIndex = Math.floor(random() * availableNodes.length);
-    selectedNodes.push(availableNodes[randomIndex]);
-    availableNodes.splice(randomIndex, 1);
-  }
-
-  // A fast node goes first (it serves single requests; the second is the retry target)
-  if (timing) {
-    const fastNodeIndex = selectedNodes.findIndex(c => isFast(c, timing));
-    if (fastNodeIndex !== -1) {
-      const [fastNode] = selectedNodes.splice(fastNodeIndex, 1);
-      selectedNodes.unshift(fastNode);
-    }
-  }
-
-  const socketIds = selectedNodes.map(c => c.wsID);
+  // Comparison set: the chosen node plus 2 drawn from the other fast nodes and up to 2 slow ones
   let handler = 'single';
   let reason;
-  if (socketIds.length < 3) {
-    reason = 'fewer than 3 nodes';
-  } else if (!profile.compare) {
+  let picked;
+  const spot = [];
+  if (spotChecks && slowAtTarget.length > 0) {
+    const availableSlow = [...slowAtTarget];
+    while (spot.length < 2 && availableSlow.length > 0) {
+      spot.push(availableSlow.splice(Math.floor(random() * availableSlow.length), 1)[0]);
+    }
+  }
+  const setPool = [...otherFast, ...spot];
+  if (!profile.compare) {
     reason = 'skips comparison';
+  } else if (setPool.length < 2) {
+    reason = 'fewer than 3 nodes';
   } else if (Math.floor(random() * requestSetChance) === 0) {
     handler = 'set';
     reason = 'random set';
+    const others = [];
+    const available = [...setPool];
+    while (others.length < 2) others.push(available.splice(Math.floor(random() * available.length), 1)[0]);
+    picked = [primary, ...others];
   } else {
     reason = 'random single';
   }
+  if (handler === 'single') {
+    // Retry target: another fast node at the highest block (never a slow one, D13)
+    picked = otherFast.length > 0 ? [primary, powerOfTwo(otherFast, loads, random)] : [primary];
+  }
 
+  const socketIds = picked.map(c => c.wsID);
+  const slowPicked = picked.filter(c => !isFast(c, timing)).length;
   console.log(`🔀 ${rpcRequest.method}: ${snapshot.nodes.length} → ${clientsWithBlocks.length} checked in → ` +
-    `${highestBlockClients.length} at block ${targetBlock} → pool ${selectionPool.length} (${slowCount} slow) → ` +
-    `${socketIds.length} picked, ${handler} (${reason})`);
+    `${fastNodes.length} fast → ${candidates.length} at block ${targetBlock} → picked ${primary.id} ` +
+    `(load ${loads[primary.id] || 0}; loads [${candidates.map(c => loads[c.id] || 0).join(',')}]), ` +
+    `${handler} (${reason}), ${socketIds.length} node(s)${slowPicked ? `, ${slowPicked} slow spot check(s)` : ''}`);
   return { socketIds, handler, heavy: null, reason };
 }
 
@@ -237,14 +278,16 @@ function selectLight(rpcRequest, profile, snapshot, random) {
  * node can serve.
  */
 function getHeavyStatus(poolMap) {
+  // Slow nodes never serve getLogs (D13), so they don't count as ready
+  const timing = getNodeTimingData();
   const ready = Array.from(poolMap.values()).filter(c =>
-    isCheckedIn(c) && hasValidBlock(c) && isReth(c) && Number.isFinite(c.receipt_floor));
+    isCheckedIn(c) && hasValidBlock(c) && isReth(c) && Number.isFinite(c.receipt_floor) && isFast(c, timing));
   return {
     readyNodes: ready.length,
     receiptFloor: ready.length > 0 ? Math.min(...ready.map(c => c.receipt_floor)) : null,
     receiptFloorAll: ready.length > 0 ? Math.max(...ready.map(c => c.receipt_floor)) : null,
-    inFlight: heavyInFlight.total(),
+    inFlight: nodeLoad.heavyTotal(),
   };
 }
 
-module.exports = { select, takeSnapshot, getProfile, resolveFromBlock, getHeavyStatus };
+module.exports = { select, takeSnapshot, getProfile, resolveFromBlock, requestCost, powerOfTwo, getHeavyStatus };

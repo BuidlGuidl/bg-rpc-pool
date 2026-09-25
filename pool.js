@@ -16,7 +16,7 @@ const { getRpcSiteStatsObject } = require('./utils/getRpcSiteStatsObject');
 const { getYourNodesObject } = require('./utils/getYourNodesObject');
 const { select, takeSnapshot, getHeavyStatus } = require('./utils/selectNodes');
 const { decideLegacy } = require('./utils/routeLegacy');
-const heavyInFlight = require('./utils/heavyInFlight');
+const nodeLoad = require('./utils/nodeLoad');
 const { fetchNodeTimingData } = require('./utils/nodeTimingUtils');
 const { handleRequestSingle } = require('./utils/handleRequestSingle');
 const { handleRequestSet } = require('./utils/handleRequestSet');
@@ -477,17 +477,17 @@ const wsServerInternal = require('https').createServer(
           console.log(`Selected clients: ${decision.socketIds}`);
           if (decision.heavy) {
             // getLogs: one eligible reth node, no retry, no comparison
-            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, decision.heavy);
+            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, decision.heavy, decision.cost ?? 1);
           } else if (decision.handler === 'set') {
             console.log(`🖖 Randomly selected handleRequestSet (1/${requestSetChance} probability)`);
-            result = await handleRequestSet(rpcRequest, decision.socketIds, poolMap, io);
+            result = await handleRequestSet(rpcRequest, decision.socketIds, poolMap, io, decision.cost ?? 1);
           } else {
             if (decision.reason === 'skips comparison') {
               console.log(`Using handleRequestSingle for ${rpcRequest.method} (skips comparison)`);
             } else if (decision.reason === 'random single') {
               console.log(`☝️ Randomly selected handleRequestSingle (${requestSetChance-1}/${requestSetChance} probability)`);
             }
-            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io);
+            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, null, decision.cost ?? 1);
           }
           
           if (result.status === 'success') {
@@ -761,7 +761,7 @@ io.on('connection', (socket) => {
     }
     poolMap.delete(socket.id);
     suspiciousNodes.delete(socket.id);
-    heavyInFlight.releaseSocket(socket.id);
+    nodeLoad.releaseSocket(socket.id);
   });
 });
 

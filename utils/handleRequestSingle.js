@@ -7,14 +7,15 @@
  * @param {Object} [heavyConfig] - config.heavyMethods entry for getLogs/filter methods: own
  *   timeout, retry only if heavyConfig.retry, per-node in-flight counting, and timeouts logged
  *   as 'timeout_error_heavy' (kept out of node ratings)
+ * @param {number} [cost=1] - weight of this request in the node's in-flight load (Phase 3b-2)
  * @returns {Promise<Object>} - Promise resolving to the result of the RPC request
  */
 const { logNode } = require('./logNode');
-const heavyInFlight = require('./heavyInFlight');
+const nodeLoad = require('./nodeLoad');
 
 const { nodeDefaultTimeout, nodeMethodSpecificTimeouts } = require('../config');
 
-async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, heavyConfig = null) {
+async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, heavyConfig = null, cost = 1) {
   const startTime = Date.now();
   const utcTimestamp = new Date().toISOString();
 
@@ -29,7 +30,7 @@ async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, h
   }
 
   // Try first node
-  const firstResult = await tryNode(rpcRequest, selectedSocketIds[0], poolMap, io, startTime, utcTimestamp, heavyConfig);
+  const firstResult = await tryNode(rpcRequest, selectedSocketIds[0], poolMap, io, startTime, utcTimestamp, heavyConfig, cost);
   
   // If first node succeeded or failed with non-timeout error, return immediately
   if (firstResult.status === 'success' || firstResult.data.code !== -69005) {
@@ -44,7 +45,7 @@ async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, h
   // First node timed out - check if we have a second node to try
   if (selectedSocketIds.length > 1) {
     console.log(`🔄 First node timed out, retrying with second node...`);
-    const secondResult = await tryNode(rpcRequest, selectedSocketIds[1], poolMap, io, startTime, utcTimestamp, heavyConfig);
+    const secondResult = await tryNode(rpcRequest, selectedSocketIds[1], poolMap, io, startTime, utcTimestamp, heavyConfig, cost);
     return secondResult;
   }
   
@@ -62,9 +63,10 @@ async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, h
  * @param {number} startTime - Timestamp when the overall request started (for UTC timestamp)
  * @param {string} utcTimestamp - UTC timestamp string
  * @param {Object|null} heavyConfig - see handleRequestSingle
+ * @param {number} cost - see handleRequestSingle
  * @returns {Promise<Object>} - Promise resolving to the result of the RPC request
  */
-async function tryNode(rpcRequest, clientId, poolMap, io, startTime, utcTimestamp, heavyConfig) {
+async function tryNode(rpcRequest, clientId, poolMap, io, startTime, utcTimestamp, heavyConfig, cost) {
   // Track this specific node attempt's start time for accurate duration logging
   const nodeStartTime = Date.now();
   
@@ -106,9 +108,9 @@ async function tryNode(rpcRequest, clientId, poolMap, io, startTime, utcTimestam
       ? heavyConfig.timeout
       : (nodeMethodSpecificTimeouts[rpcRequest.method] || nodeDefaultTimeout);
 
-    // Heavy methods count against the node until it answers or the socket disconnects,
-    // not until the timeout: the node keeps working after we stop waiting
-    const heavyToken = heavyConfig ? heavyInFlight.acquire(client.id, client.wsID) : null;
+    // Counts against the node until it answers or the socket disconnects, not until the
+    // timeout: the node keeps working after we stop waiting
+    const loadToken = nodeLoad.acquire(client.id, client.wsID, { cost, heavy: !!heavyConfig });
 
     // Set up timeout for the client
     const timeoutId = setTimeout(() => {
@@ -142,7 +144,7 @@ async function tryNode(rpcRequest, clientId, poolMap, io, startTime, utcTimestam
 
     // Send the request to the client
     socket.emit('rpc_request', rpcRequest, async (response) => {
-      if (heavyToken !== null) heavyInFlight.release(client.id, heavyToken);
+      nodeLoad.release(client.id, loadToken);
 
       if (hasResolved) { // If already resolved (e.g., by timeout), ignore this response
         console.warn(`Ignoring response from node ${client.id} as the request already timed out.`);

@@ -19,6 +19,7 @@ them). Each prints `PASS`/`FAIL` lines and ends with `all passed` or `N FAILED`.
 | `testfilters.js` | D15 | 1+ node | the six filter methods answer `-32601`; `eth_getLogs` still works |
 | `testS2.js` | deferred M5–M7 | 2+ reth nodes with different floors | routing by floor coverage, capacity spill-over, `/getlogsStatus` (lowest floor, D14) |
 | `testS3.js` | deferred M4, M12 | 3+ nodes at the same head | getLogs never compared; `eth_call` still 1-in-20 compared; spread across nodes |
+| `testM14.js` | deferred M14 (and M18) | 2+ nodes; bgnode7 as the only one covering 25.5M | a node kept busy with getLogs gets clearly fewer light requests (power of two, 3b-3): baseline split vs split under load |
 | `freshness-summary.sh` | 3b "Decide" (freshness) | pool log with `🧭` lines | summary of candidates at / within 1 of the highest block |
 
 Stage-specific values are hard-coded: receipt floors 25,300,000 (bgnode7) and
