@@ -16,6 +16,19 @@ const nodeMethodSpecificTimeouts = {
 // in-flight cap, one node (no retry, no comparison), and their own timeout. Timeouts are
 // logged as `timeout_error_heavy` so they don't count against node ratings in bg-rpc-logs.
 // Rollback: set to {} and these methods take the normal path again.
+// Filter ("ticket") methods are turned off (getLogs plan D15): a filter id only exists on the
+// node that created it, and with several nodes the follow-up call usually lands elsewhere.
+// Answered with -32601 (in ignoredErrorCodes: no fallback, no alert). Remove entries to re-enable
+// once filter-id -> node routing exists.
+const disabledMethods = [
+  'eth_newFilter',
+  'eth_newBlockFilter',
+  'eth_newPendingTransactionFilter',
+  'eth_getFilterChanges',
+  'eth_getFilterLogs',
+  'eth_uninstallFilter',
+];
+
 const heavyMethods = {
   eth_getLogs:          { timeout: 5000, retry: false, maxPerNode: 4 },
   eth_getFilterLogs:    { timeout: 5000, retry: false, maxPerNode: 4 },
@@ -118,6 +131,7 @@ module.exports = {
   nodeDefaultTimeout,
   nodeMethodSpecificTimeouts,
   heavyMethods,
+  disabledMethods,
   heavyInFlightMaxAge,
   pointUpdateInterval,
   requestSetChance,

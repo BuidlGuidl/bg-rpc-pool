@@ -28,7 +28,7 @@ const { getBlockNumberMode } = require('./utils/getBlockNumberMode');
 const { sendTelegramAlert } = require('./utils/telegramUtils');
 const { isMachineIdSuspicious, extractMacAddressFromMachineId, getSuspiciousMacAddresses, reloadSuspiciousMacAddresses } = require('./utils/suspiciousMacChecker');
 
-const { portPoolPublic, poolPort, wsHeartbeatInterval, requestSetChance, nodeTimingFetchInterval, poolNodeStaleThreshold, methodsToSkipComparison, cacheableMethods, heavyMethods } = require('./config');
+const { portPoolPublic, poolPort, wsHeartbeatInterval, requestSetChance, nodeTimingFetchInterval, poolNodeStaleThreshold, methodsToSkipComparison, cacheableMethods, heavyMethods, disabledMethods } = require('./config');
 
 const poolMap = new Map();
 
@@ -462,6 +462,20 @@ const wsServerInternal = require('https').createServer(
 
         try {
           let result;
+
+          if (disabledMethods.includes(rpcRequest.method)) {
+            console.log(`🚫 ${rpcRequest.method} is disabled`);
+            res.statusCode = 500;
+            res.end(JSON.stringify({
+              jsonrpc: "2.0",
+              error: {
+                code: -32601,
+                message: `${rpcRequest.method} is not supported on this endpoint; use eth_getLogs`
+              },
+              id: rpcRequest.id
+            }));
+            return;
+          }
 
           // getLogs and filter methods: one eligible reth node, no retry, no comparison, not cached
           const heavyConfig = heavyMethods[rpcRequest.method];
