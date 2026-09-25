@@ -8,6 +8,9 @@
  *   timeout, retry only if heavyConfig.retry, per-node in-flight counting, and timeouts logged
  *   as 'timeout_error_heavy' (kept out of node ratings)
  * @param {number} [cost=1] - weight of this request in the node's in-flight load (Phase 3b-2)
+ * @param {Function} [selectRetry] - (triedNodeIds) => socket id or null. When given, a timed-out
+ *   request is retried on the node it picks at that moment (Phase 3b-4); without it (legacy
+ *   routing) the retry goes to selectedSocketIds[1]
  * @returns {Promise<Object>} - Promise resolving to the result of the RPC request
  */
 const { logNode } = require('./logNode');
@@ -15,7 +18,7 @@ const nodeLoad = require('./nodeLoad');
 
 const { nodeDefaultTimeout, nodeMethodSpecificTimeouts } = require('../config');
 
-async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, heavyConfig = null, cost = 1) {
+async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, heavyConfig = null, cost = 1, selectRetry = null) {
   const startTime = Date.now();
   const utcTimestamp = new Date().toISOString();
 
@@ -43,9 +46,11 @@ async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, h
   }
   
   // First node timed out - check if we have a second node to try
-  if (selectedSocketIds.length > 1) {
+  const firstNodeId = poolMap.get(selectedSocketIds[0])?.id;
+  const retrySocketId = selectRetry ? selectRetry([firstNodeId]) : selectedSocketIds[1];
+  if (retrySocketId) {
     console.log(`🔄 First node timed out, retrying with second node...`);
-    const secondResult = await tryNode(rpcRequest, selectedSocketIds[1], poolMap, io, startTime, utcTimestamp, heavyConfig, cost);
+    const secondResult = await tryNode(rpcRequest, retrySocketId, poolMap, io, startTime, utcTimestamp, heavyConfig, cost);
     return secondResult;
   }
   

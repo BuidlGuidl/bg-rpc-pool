@@ -8,6 +8,7 @@ const nodeLoad = require('./nodeLoad');
 //   - only fast nodes serve a request (D13); slow ones only join comparison sets as spot checks
 //   - only nodes at the exact highest block among fast nodes (owner decision 2026-09-25)
 //   - among those, power of two choices on weighted in-flight load (nodeLoad, 3b-2)
+//   - a retry selects again at retry time, without the node(s) already tried (3b-4)
 
 const TAGS_AT_HEAD = ['latest', 'safe', 'finalized']; // always above any node's receipt floor
 
@@ -128,7 +129,9 @@ function takeSnapshot(poolMap) {
 /**
  * Decides which node(s) serve a request.
  * @param {Object} rpcRequest
- * @param {{ nodes: Object[], timing: Object|null, heavyCounts: Object, loads?: Object, random?: Function }} snapshot
+ * @param {{ nodes: Object[], timing: Object|null, heavyCounts: Object, loads?: Object, random?: Function,
+ *           exclude?: string[], retry?: boolean }} snapshot
+ *   exclude: node ids not to pick (already tried); retry: pick one node for a retry (no comparison)
  * @returns {{ error: Object, reason: string } |
  *           { socketIds: string[], handler: 'single'|'set', heavy: Object|null, cost: number, reason: string }}
  */
@@ -212,7 +215,8 @@ function selectLight(rpcRequest, profile, snapshot, random) {
   const spotChecks = snapshot.slowSpotChecks ?? slowSpotChecks;
   const noClients = { error: { code: -69000, message: "No clients connected to pool" }, reason: 'no clients' };
 
-  const clientsWithBlocks = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c));
+  const exclude = snapshot.exclude || [];
+  const clientsWithBlocks = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c) && !exclude.includes(c.id));
   if (clientsWithBlocks.length === 0) return noClients;
   const fastNodes = clientsWithBlocks.filter(c => isFast(c, timing));
   if (fastNodes.length === 0) return { ...noClients, reason: 'only slow nodes' }; // D13
@@ -229,6 +233,12 @@ function selectLight(rpcRequest, profile, snapshot, random) {
 
   const primary = powerOfTwo(candidates, loads, random);
   const otherFast = candidates.filter(c => c !== primary);
+
+  if (snapshot.retry) {
+    console.log(`🔁 ${rpcRequest.method} retry: excluded [${exclude.join(',')}] → ${fastNodes.length} fast → ` +
+      `${candidates.length} at block ${targetBlock} → picked ${primary.id} (load ${loads[primary.id] || 0}; loads [${candidates.map(c => loads[c.id] || 0).join(',')}])`);
+    return { socketIds: [primary.wsID], handler: 'single', heavy: null, reason: 'retry' };
+  }
 
   // Comparison set: the chosen node plus 2 drawn from the other fast nodes and up to 2 slow ones
   let handler = 'single';
@@ -257,8 +267,8 @@ function selectLight(rpcRequest, profile, snapshot, random) {
     reason = 'random single';
   }
   if (handler === 'single') {
-    // Retry target: another fast node at the highest block (never a slow one, D13)
-    picked = otherFast.length > 0 ? [primary, powerOfTwo(otherFast, loads, random)] : [primary];
+    // The retry node is chosen when a retry happens (3b-4), not now
+    picked = [primary];
   }
 
   const socketIds = picked.map(c => c.wsID);

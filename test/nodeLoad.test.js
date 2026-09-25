@@ -124,6 +124,39 @@ describe('dispatch counts load from send until the node answers or disconnects',
     expect(nodeLoad.load('a')).toBe(0);
   });
 
+  test('3b-4: after a timeout the retry goes to the node chosen at that moment, not the pre-picked one', async () => {
+    const { io, pending } = fakeIo(['ws-a', 'ws-b', 'ws-c']);
+    const selectRetry = jest.fn(() => 'ws-c');
+    const p = handleRequestSingle({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }, ['ws-a', 'ws-b'],
+      poolOf(['a', 'b', 'c']), io, null, 1, selectRetry);
+    jest.advanceTimersByTime(nodeDefaultTimeout + 1);
+    for (let i = 0; i < 20 && pending['ws-c'].length === 0; i++) await Promise.resolve();
+    expect(selectRetry).toHaveBeenCalledWith(['a']);
+    expect([pending['ws-b'].length, pending['ws-c'].length]).toEqual([0, 1]);
+    answer(pending['ws-c'][0]);
+    await expect(p).resolves.toMatchObject({ status: 'success' });
+  });
+
+  test('3b-4: no node for the retry → no retry, the timeout goes back to bg-rpc-proxy', async () => {
+    const { io, pending } = fakeIo(['ws-a', 'ws-b']);
+    const selectRetry = jest.fn(() => null);
+    const p = handleRequestSingle({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }, ['ws-a'],
+      poolOf(['a', 'b']), io, null, 1, selectRetry);
+    jest.advanceTimersByTime(nodeDefaultTimeout + 1);
+    await expect(p).resolves.toMatchObject({ status: 'error', data: { code: -69005 } });
+    expect(selectRetry).toHaveBeenCalledTimes(1);
+    expect(pending['ws-b'].length).toBe(0);
+  });
+
+  test('3b-4: no retry selection when the first node answers', async () => {
+    const { io, pending } = fakeIo(['ws-a']);
+    const selectRetry = jest.fn(() => 'ws-x');
+    const p = handleRequestSingle({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }, ['ws-a'], poolOf(['a']), io, null, 1, selectRetry);
+    answer(pending['ws-a'][0]);
+    await expect(p).resolves.toMatchObject({ status: 'success' });
+    expect(selectRetry).not.toHaveBeenCalled();
+  });
+
   test('heavy request: weighted, counts toward the heavy cap, released on disconnect', async () => {
     const { io } = fakeIo(['ws-a']);
     const heavy = { timeout: 5000, retry: false, maxPerNode: 4 };

@@ -487,7 +487,12 @@ const wsServerInternal = require('https').createServer(
             } else if (decision.reason === 'random single') {
               console.log(`☝️ Randomly selected handleRequestSingle (${requestSetChance-1}/${requestSetChance} probability)`);
             }
-            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, null, decision.cost ?? 1);
+            // Pipeline: a retry picks its node when it happens, without the node that timed out (3b-4)
+            const selectRetry = routingMode === 'legacy' ? null : (triedNodeIds) => {
+              const retry = select(rpcRequest, { ...takeSnapshot(poolMap), exclude: triedNodeIds, retry: true });
+              return retry.error ? null : retry.socketIds[0];
+            };
+            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, null, decision.cost ?? 1, selectRetry);
           }
           
           if (result.status === 'success') {

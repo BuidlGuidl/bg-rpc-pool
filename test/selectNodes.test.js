@@ -212,10 +212,24 @@ describe('generated pools: 3b-3 rules, and differences from the old code only wh
     if (!picked.every((n) => eligible(n) && blockOf(n) === target)) fail('picked a node not at the exact highest block among fast nodes');
     if (!isFastNode(picked[0], timing)) fail('first node is slow');
     if (pipeline.handler === 'single') {
-      if (picked.length > 2 || !picked.every((n) => isFastNode(n, timing))) fail('single: only a fast node and a fast retry target');
+      if (picked.length !== 1 || !isFastNode(picked[0], timing)) fail('single: one fast node (the retry is chosen later, 3b-4)');
     } else {
       if (!COMPARE.has(request.method)) fail('comparison for a method that skips it');
       if (picked.length !== 3 || picked.filter((n) => !isFastNode(n, timing)).length > 2) fail('set: 3 nodes, at most 2 slow');
+    }
+
+    // 3b-4: a retry without the first node → another fast node at the highest block among
+    // the remaining fast nodes, or none
+    const tried = picked[0];
+    const retry = withSeed(7, () => select(request, { ...takeSnapshot(poolOf(nodes)), exclude: [tried.id], retry: true }));
+    const otherFast = fast.filter((n) => n.id !== tried.id);
+    if (otherFast.length === 0) {
+      if (retry.error?.code !== -69000) fail('retry with no other fast node must find none');
+    } else {
+      const node = nodes.find((n) => n.wsID === retry.socketIds?.[0]);
+      const retryTarget = Math.max(...otherFast.map(blockOf));
+      if (retry.error || retry.socketIds.length !== 1 || retry.handler !== 'single') fail('retry: exactly one node, never a comparison set');
+      else if (node.id === tried.id || !isFastNode(node, timing) || blockOf(node) !== retryTarget) fail('retry picked the tried node, a slow node, or one not at the highest block');
     }
   }
 
@@ -312,6 +326,25 @@ describe('D13: fast/slow is a hard switch', () => {
   const timing = { s1: 0.5, s2: 0.2 };
   const decide = (seed, method = 'eth_call', flags = {}) =>
     withSeed(seed, () => select({ jsonrpc: '2.0', id: 1, method, params: [] }, { nodes, timing, heavyCounts: {}, loads: {}, ...flags }));
+
+  test('retry: never the tried node, never slow, even when only slow nodes are left → none', () => {
+    const snap = (exclude) => ({ nodes, timing, heavyCounts: {}, loads: {}, exclude, retry: true });
+    for (let s = 0; s < 500; s++) {
+      expect(withSeed(s, () => select({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }, snap(['f1']))).socketIds).toEqual(['ws-f2']);
+    }
+    expect(select({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }, snap(['f1', 'f2'])).error.code).toBe(-69000);
+  });
+
+  test('retry picks by load at retry time', () => {
+    const three = ['a', 'b', 'c'].map((id) => makeNode(id));
+    let toBusy = 0;
+    for (let s = 0; s < 1000; s++) {
+      const d = withSeed(s, () => select({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] },
+        { nodes: three, timing: null, heavyCounts: {}, loads: { b: 30, c: 0 }, exclude: ['a'], retry: true }));
+      if (d.socketIds[0] === 'ws-b') toBusy++;
+    }
+    expect(toBusy).toBe(0);
+  });
 
   test('slow nodes never take a first attempt or a retry; only comparison sets, at most 2, ~1 in 20', () => {
     let sets = 0;
