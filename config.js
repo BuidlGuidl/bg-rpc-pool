@@ -3,38 +3,81 @@ const poolPort = 3003;
 const wsHeartbeatInterval = 30000; // 30 seconds
 const nodeDefaultTimeout = 3000;
 
-// Method-specific timeouts (in milliseconds)
-const nodeMethodSpecificTimeouts = {
-  'eth_getBlockReceipts': 2000,
-  'eth_getBlockByNumber': 1500,
-  'eth_getBlockByHash': 1500,
-  'eth_getLogs': 10000, // only used if heavyMethods is rolled back to {}
-  'eth_getTransactionReceipt': 2000,
-};
+// Which routing code handles /requestPool: 'pipeline' (utils/selectNodes.js, one selection
+// function for every method, getLogs plan Phase 3b) or 'legacy' (selectRandomClients +
+// selectHeavyClient, as before 3b). Rollback switch; remove 'legacy' once 3b has run clean.
+const routingMode = 'pipeline';
 
-// getLogs and filter methods: reth-only routing with a receipt-floor check, a per-node
-// in-flight cap, one node (no retry, no comparison), and their own timeout. Timeouts are
-// logged as `timeout_error_heavy` so they don't count against node ratings in bg-rpc-logs.
-// Rollback: set to {} and these methods take the normal path again.
-// Filter ("ticket") methods are turned off (getLogs plan D15): a filter id only exists on the
+// Routing profile per method: the one place that says how each method is handled.
+// Anything not listed gets defaultMethodProfile.
+//   timeout  ms to wait for a node
+//   retry    try a second node after a timeout
+//   compare  may take part in the 1-in-requestSetChance 3-node comparison
+//   heavy    reth-only routing with a receipt-floor check and a per-node in-flight cap
+//            ({ maxPerNode }); timeouts are logged as `timeout_error_heavy`, so they don't
+//            count against node ratings in bg-rpc-logs
+//   disabled answer -32601 without touching a node
+const defaultMethodProfile = { timeout: nodeDefaultTimeout, retry: true, compare: true };
+
+// Constant or node-specific answers, or "latest" state that legitimately differs between
+// nodes on different blocks: never compared
+const noCompare = { compare: false };
+
+// Filter ("ticket") methods are disabled (getLogs plan D15): a filter id only exists on the
 // node that created it, and with several nodes the follow-up call usually lands elsewhere.
-// Answered with -32601 (in ignoredErrorCodes: no fallback, no alert). Remove entries to re-enable
-// once filter-id -> node routing exists.
-const disabledMethods = [
-  'eth_newFilter',
-  'eth_newBlockFilter',
-  'eth_newPendingTransactionFilter',
-  'eth_getFilterChanges',
-  'eth_getFilterLogs',
-  'eth_uninstallFilter',
-];
+// Their routing settings are kept, so deleting `disabled` re-enables them as before.
+const methodProfiles = {
+  eth_getBlockReceipts:      { timeout: 2000 },
+  eth_getBlockByNumber:      { timeout: 1500 },
+  eth_getBlockByHash:        { timeout: 1500 },
+  eth_getTransactionReceipt: { timeout: 2000 },
 
-const heavyMethods = {
-  eth_getLogs:          { timeout: 5000, retry: false, maxPerNode: 4 },
-  eth_getFilterLogs:    { timeout: 5000, retry: false, maxPerNode: 4 },
-  eth_newFilter:        { timeout: 3000, retry: false, maxPerNode: 4 },
-  eth_getFilterChanges: { timeout: 3000, retry: false, maxPerNode: 4 },
+  // Constant network information
+  eth_chainId:               noCompare,
+  net_version:               noCompare,
+  eth_protocolVersion:       noCompare,
+  // Node-specific state (not consensus data)
+  eth_accounts:              noCompare,
+  eth_syncing:               noCompare,
+  eth_mining:                noCompare,
+  eth_hashrate:              noCompare,
+  eth_coinbase:              noCompare,
+  net_listening:             noCompare,
+  net_peerCount:             noCompare,
+  web3_clientVersion:        noCompare,
+  web3_sha3:                 noCompare, // Pure function, not state
+  // Time-sensitive "latest" state
+  eth_blockNumber:           noCompare,
+  eth_gasPrice:              noCompare,
+  eth_maxPriorityFeePerGas:  noCompare,
+  eth_feeHistory:            noCompare,
+  // Mempool (inherently node-specific)
+  eth_pendingTransactions:   noCompare,
+  txpool_status:             noCompare,
+  txpool_content:            noCompare,
+  txpool_inspect:            noCompare,
+
+  // Range queries
+  eth_getLogs:               { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 } },
+
+  // Filter methods (disabled, D15)
+  eth_getFilterLogs:         { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, disabled: true },
+  eth_newFilter:             { timeout: 3000, retry: false, compare: false, heavy: { maxPerNode: 4 }, disabled: true },
+  eth_getFilterChanges:      { timeout: 3000, retry: false, compare: false, heavy: { maxPerNode: 4 }, disabled: true },
+  eth_newBlockFilter:        { compare: false, disabled: true },
+  eth_newPendingTransactionFilter: { compare: false, disabled: true },
+  eth_uninstallFilter:       { compare: false, disabled: true },
 };
+
+// Views of methodProfiles in the shape older code reads (handleRequestSingle/Set, legacy routing)
+const profileEntries = Object.entries(methodProfiles).map(([method, p]) => [method, { ...defaultMethodProfile, ...p }]);
+const nodeMethodSpecificTimeouts = Object.fromEntries(
+  profileEntries.filter(([, p]) => p.timeout !== nodeDefaultTimeout).map(([method, p]) => [method, p.timeout]));
+const methodsToSkipComparison = profileEntries.filter(([, p]) => !p.compare).map(([method]) => method);
+const heavyMethods = Object.fromEntries(profileEntries.filter(([, p]) => p.heavy)
+  .map(([method, p]) => [method, { timeout: p.timeout, retry: p.retry, maxPerNode: p.heavy.maxPerNode }]));
+const disabledMethods = profileEntries.filter(([, p]) => p.disabled).map(([method]) => method);
+
 const heavyInFlightMaxAge = 120000; // Drop in-flight entries whose response never came back (ms)
 
 const pointUpdateInterval = 10000;
@@ -46,52 +89,6 @@ const poolNodeStaleThreshold = 5 * 60 * 1000; // 5 minutes Timeout threshold for
 
 const poolNodeLogPath = "/home/ubuntu/shared/poolNodes.log";
 const compareResultsLogPath = "/home/ubuntu/shared/poolCompareResults.log";
-
-// Methods that should skip comparison and always use handleRequestSingle
-// These fall into two categories:
-// 1. Constant/informational methods that don't need consensus checking
-// 2. Time-sensitive methods that query current state and can legitimately differ between nodes on different blocks
-const methodsToSkipComparison = [
-  // Constant network information
-  'eth_chainId',              // Always returns 0x1 for mainnet
-  'net_version',              // Always returns "1" for mainnet
-  'eth_protocolVersion',      // Protocol version
-  
-  // Node-specific state (not consensus data)
-  'eth_accounts',             // Local accounts (typically empty on public nodes)
-  'eth_syncing',              // Node sync status
-  'eth_mining',               // Node mining status
-  'eth_hashrate',             // Node hashrate
-  'eth_coinbase',             // Node coinbase address
-  'net_listening',            // Node listening status
-  'net_peerCount',            // Node peer count
-  'web3_clientVersion',       // Client software version
-  'web3_sha3',                // Pure function, not state
-  
-  // Time-sensitive methods that query "latest" state without block specification
-  // These can legitimately differ if nodes are on different blocks
-  'eth_blockNumber',          // Current block number (varies by node sync state)
-  'eth_gasPrice',             // Current gas price (varies by block)
-  'eth_maxPriorityFeePerGas', // Current priority fee (varies by block)
-  'eth_feeHistory',           // Fee history (can show different latest blocks)
-  
-  // Range queries (also routed by heavyMethods; listed here so a rollback of that never compares)
-  'eth_getLogs',
-
-  // Methods that might have transient differences
-  'eth_getFilterChanges',     // Filter-specific, stateful
-  'eth_getFilterLogs',        // Filter-specific, stateful
-  'eth_uninstallFilter',      // Filter-specific, stateful
-  'eth_newFilter',            // Filter-specific, stateful
-  'eth_newBlockFilter',       // Filter-specific, stateful
-  'eth_newPendingTransactionFilter', // Filter-specific, stateful
-  
-  // Methods that query mempool (inherently node-specific)
-  'eth_pendingTransactions',  // Node's local mempool
-  'txpool_status',            // Node's transaction pool
-  'txpool_content',           // Node's transaction pool
-  'txpool_inspect',           // Node's transaction pool
-];
 
 // Map of RPC methods that can be cached with their block number parameter positions
 const cacheableMethods = new Map([  
@@ -132,6 +129,9 @@ module.exports = {
   nodeMethodSpecificTimeouts,
   heavyMethods,
   disabledMethods,
+  routingMode,
+  defaultMethodProfile,
+  methodProfiles,
   heavyInFlightMaxAge,
   pointUpdateInterval,
   requestSetChance,

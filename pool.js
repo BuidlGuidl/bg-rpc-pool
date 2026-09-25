@@ -14,8 +14,8 @@ const { getPoolNodesObject } = require('./utils/getPoolNodesObject');
 const { constructNodeContinentsObject, getNodeContinentsObject } = require('./utils/getNodeContinentsObject');
 const { getRpcSiteStatsObject } = require('./utils/getRpcSiteStatsObject');
 const { getYourNodesObject } = require('./utils/getYourNodesObject');
-const { selectRandomClients } = require('./utils/selectRandomClients');
-const { selectHeavyClient, getHeavyStatus } = require('./utils/selectHeavyClient');
+const { select, takeSnapshot, getHeavyStatus } = require('./utils/selectNodes');
+const { decideLegacy } = require('./utils/routeLegacy');
 const heavyInFlight = require('./utils/heavyInFlight');
 const { fetchNodeTimingData } = require('./utils/nodeTimingUtils');
 const { handleRequestSingle } = require('./utils/handleRequestSingle');
@@ -28,7 +28,7 @@ const { getBlockNumberMode } = require('./utils/getBlockNumberMode');
 const { sendTelegramAlert } = require('./utils/telegramUtils');
 const { isMachineIdSuspicious, extractMacAddressFromMachineId, getSuspiciousMacAddresses, reloadSuspiciousMacAddresses } = require('./utils/suspiciousMacChecker');
 
-const { portPoolPublic, poolPort, wsHeartbeatInterval, requestSetChance, nodeTimingFetchInterval, poolNodeStaleThreshold, methodsToSkipComparison, cacheableMethods, heavyMethods, disabledMethods } = require('./config');
+const { portPoolPublic, poolPort, wsHeartbeatInterval, requestSetChance, nodeTimingFetchInterval, poolNodeStaleThreshold, cacheableMethods, routingMode } = require('./config');
 
 const poolMap = new Map();
 
@@ -463,65 +463,31 @@ const wsServerInternal = require('https').createServer(
         try {
           let result;
 
-          if (disabledMethods.includes(rpcRequest.method)) {
-            console.log(`🚫 ${rpcRequest.method} is disabled`);
+          const decision = routingMode === 'legacy'
+            ? decideLegacy(rpcRequest, poolMap)
+            : select(rpcRequest, takeSnapshot(poolMap));
+
+          if (decision.error) {
+            console.log(`🚫 ${rpcRequest.method}: ${decision.error.message}`);
             res.statusCode = 500;
-            res.end(JSON.stringify({
-              jsonrpc: "2.0",
-              error: {
-                code: -32601,
-                message: `${rpcRequest.method} is not supported on this endpoint; use eth_getLogs`
-              },
-              id: rpcRequest.id
-            }));
+            res.end(JSON.stringify({ jsonrpc: "2.0", error: decision.error, id: rpcRequest.id }));
             return;
           }
 
-          // getLogs and filter methods: one eligible reth node, no retry, no comparison, not cached
-          const heavyConfig = heavyMethods[rpcRequest.method];
-          if (heavyConfig) {
-            const selection = selectHeavyClient(poolMap, rpcRequest, heavyConfig);
-            result = selection.error
-              ? { status: 'error', data: selection.error }
-              : await handleRequestSingle(rpcRequest, [selection.socketId], poolMap, io, heavyConfig);
-
-            res.statusCode = result.status === 'success' ? 200 : 500;
-            res.end(JSON.stringify(result.status === 'success'
-              ? { jsonrpc: "2.0", result: result.data, id: rpcRequest.id }
-              : { jsonrpc: "2.0", error: result.data, id: rpcRequest.id }));
-            return;
-          }
-
-          const selectedClients = selectRandomClients(poolMap);
-          console.log(`Selected clients: ${selectedClients}`);
-
-          if (selectedClients.length === 0) {
-            console.log("No clients connected to pool");
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-              jsonrpc: "2.0",
-              error: {
-                code: -69000,
-                message: "No clients connected to pool"
-              },
-              id: rpcRequest.id
-            }));
-            return;
-          } else if (selectedClients.length < 3) {
-            result = await handleRequestSingle(rpcRequest, selectedClients, poolMap, io);
-          } else if (methodsToSkipComparison.includes(rpcRequest.method)) {
-            console.log(`Using handleRequestSingle for ${rpcRequest.method} (skips comparison)`);
-            result = await handleRequestSingle(rpcRequest, selectedClients, poolMap, io);
+          console.log(`Selected clients: ${decision.socketIds}`);
+          if (decision.heavy) {
+            // getLogs: one eligible reth node, no retry, no comparison
+            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, decision.heavy);
+          } else if (decision.handler === 'set') {
+            console.log(`🖖 Randomly selected handleRequestSet (1/${requestSetChance} probability)`);
+            result = await handleRequestSet(rpcRequest, decision.socketIds, poolMap, io);
           } else {
-            const useSetHandler = Math.floor(Math.random() * requestSetChance) === 0;
-            
-            if (useSetHandler) {
-              console.log(`🖖 Randomly selected handleRequestSet (1/${requestSetChance} probability)`);
-              result = await handleRequestSet(rpcRequest, selectedClients, poolMap, io);
-            } else {
+            if (decision.reason === 'skips comparison') {
+              console.log(`Using handleRequestSingle for ${rpcRequest.method} (skips comparison)`);
+            } else if (decision.reason === 'random single') {
               console.log(`☝️ Randomly selected handleRequestSingle (${requestSetChance-1}/${requestSetChance} probability)`);
-              result = await handleRequestSingle(rpcRequest, selectedClients, poolMap, io);
             }
+            result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io);
           }
           
           if (result.status === 'success') {

@@ -40,6 +40,14 @@ function getNodeTimingData() {
 }
 
 /**
+ * Replaces the timeout data (tests only)
+ * @param {Object|null} data - { nodeId: percentTimeout } or null
+ */
+function setNodeTimingData(data) {
+  nodeTimeoutData = data;
+}
+
+/**
  * Determines if a node is considered "fast" based on timeout percentage
  * @param {Object} client - The client object with id property
  * @returns {boolean} True if the node is fast (percentTimeout undefined or <= threshold)
@@ -75,6 +83,7 @@ function filterSlowNodes(clients) {
 module.exports = {
   fetchNodeTimingData,
   getNodeTimingData,
+  setNodeTimingData,
   isFastNode,
   filterFastNodes,
   filterSlowNodes,
