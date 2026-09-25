@@ -131,6 +131,12 @@ function selectRandomClients(poolMap) {
   );
   console.log('Clients at target block:', highestBlockClients.length);
 
+  // Freshness data for the 3b-3 decision (exact highest block vs within 1 block)
+  const within1 = clientsWithBlocks.filter(client => parseInt(client.block_number) >= targetBlock - 1).length;
+  console.log(`🧭 light: target ${targetBlock}, candidates ${clientsWithBlocks.length}, ` +
+    `at target ${highestBlockClients.length}, within 1 ${within1}, ` +
+    `blocks [${clientsWithBlocks.map(client => targetBlock - parseInt(client.block_number)).sort((a, b) => a - b).join(',')}]`);
+
   // If no clients at target block, return empty array
   if (highestBlockClients.length === 0) {
     console.log('No clients at target block');

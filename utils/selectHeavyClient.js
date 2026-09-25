@@ -73,6 +73,13 @@ function selectHeavyClient(poolMap, rpcRequest, heavyConfig) {
   const atHead = preferred.filter(c => parseInt(c.block_number) === targetBlock);
   const picked = atHead.length > 0 ? atHead[Math.floor(Math.random() * atHead.length)] : null;
 
+  // Freshness data for the 3b-3 decision (exact highest block vs within 1 block)
+  if (preferred.length > 0) {
+    const within1 = preferred.filter(c => parseInt(c.block_number) >= targetBlock - 1).length;
+    console.log(`🧭 heavy ${rpcRequest.method}: target ${targetBlock}, candidates ${preferred.length}, ` +
+      `at target ${atHead.length}, within 1 ${within1}, blocks [${preferred.map(c => targetBlock - parseInt(c.block_number)).sort((a, b) => a - b).join(',')}]`);
+  }
+
   console.log(
     `🏋️ ${rpcRequest.method} from ${fromBlock === null ? 'n/a' : fromBlock}: ` +
     `${checkedIn.length} → ${reth.length} reth → ${floorKnown.length} floor known → ` +
