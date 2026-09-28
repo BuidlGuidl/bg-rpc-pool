@@ -32,8 +32,10 @@ const report = (pass, name, detail) => { if (!pass) failures++; console.log(`${p
   }
   const small = await post({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }, 'gzip, br');
   report(small.enc === 'none', 'eth_blockNumber (<1 KB) not compressed', `${small.enc}, ${small.wire} bytes`);
-  const err = await post({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: '0x17d7840', toBlock: '0x17d7841' }] }, 'gzip, br');
-  report(err.enc === 'none' && /older than block/.test(err.body.toString()), 'small error response not compressed', `${err.enc}: ${err.body.toString().slice(0, 100)}`);
+  // "pending" is rejected by the pool on any stage setup (a below-floor range stopped being an
+  // error once an archive node joined, 2026-09-28)
+  const err = await post({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: 'latest', toBlock: 'pending' }] }, 'gzip, br');
+  report(err.enc === 'none' && /is not supported for eth_getLogs/.test(err.body.toString()), 'small error response not compressed', `${err.enc}: ${err.body.toString().slice(0, 100)}`);
   const batch = Array.from({ length: 50 }, (_, i) => ({ jsonrpc: '2.0', id: i, method: 'eth_blockNumber', params: [] }));
   const b = await post(batch, 'gzip');
   report(b.enc === 'gzip' && JSON.parse(b.body).length === 50, 'batch of 50 (>1 KB) compressed and parses', `${b.enc}, ${b.wire} bytes on the wire`);
