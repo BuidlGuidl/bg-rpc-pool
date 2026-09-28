@@ -53,7 +53,7 @@ describe('nodeLoad', () => {
   });
 });
 
-describe('requestCost (proposed weights: default 1, receipts 2, getLogs 1 + ceil(blocks/1000))', () => {
+describe('requestCost (shared cost table, plan D17)', () => {
   const cost = (method, params) => requestCost({ method, params }, getProfile(method), HEAD);
   test.each([
     ['eth_call', [], 1],
@@ -72,6 +72,17 @@ describe('requestCost (proposed weights: default 1, receipts 2, getLogs 1 + ceil
     ['eth_getLogs', [{ fromBlock: hex(HEAD), toBlock: hex(HEAD - 10) }], 2],            // from > to: reth rejects
     ['eth_getLogs', [{ fromBlock: 'garbage' }], 2],
     ['eth_getLogs', 'garbage', 2],
+    ['eth_getBlockByNumber', ['latest', true], 2],
+    ['eth_getBlockByHash', ['0xabc', false], 2],
+    ['eth_feeHistory', [4, 'latest', [50]], 2],
+    ['eth_feeHistory', ['0x64', 'latest', []], 2],       // 100 blocks
+    ['eth_feeHistory', [1024, 'latest', []], 12],
+    ['eth_feeHistory', [5000, 'latest', []], 12],        // capped at 1,024
+    ['eth_feeHistory', ['garbage', 'latest'], 2],
+    ['eth_getProof', ['0x1', [], 'latest'], 1],
+    ['eth_getProof', ['0x1', ['0x0'], 'latest'], 2],
+    ['eth_getProof', ['0x1', Array(1000).fill('0x0'), 'latest'], 101],
+    ['eth_getProof', ['0x1'], 1],
   ])('%s %j → %i', (method, params, expected) => expect(cost(method, params)).toBe(expected));
 
   test('select() puts the cost on the decision', () => {

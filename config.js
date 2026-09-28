@@ -17,9 +17,11 @@ const routingMode = 'pipeline';
 //            ({ maxPerNode }); timeouts are logged as `timeout_error_heavy`, so they don't
 //            count against node ratings in bg-rpc-logs
 //   disabled answer -32601 without touching a node
-//   cost     weight of one request in a node's in-flight load (Phase 3b-2): a number, or
-//            'range' = 1 + ceil(blocks / 1000) for getLogs (10k blocks = 11). Starting values,
-//            to be tuned with data
+//   cost     weight of one request in a node's in-flight load (Phase 3b-2), from the shared
+//            request cost table (getLogs plan D17; the edge's rate limiter and keyed metering use
+//            the same units): a number, or 'range' = 1 + ceil(blocks / 1000) for getLogs
+//            (10k blocks = 11), 'feeHistory' = 1 + ceil(blockCount / 100) (1,024 = 12),
+//            'proofKeys' = 1 + ceil(storageKeys / 10)
 //   history  history-aware routing (Phase 3c, utils/history.js): { kind, block }. kind is the
 //            history the answer needs: 'receipts', 'bodies' (blocks, headers, transactions) or
 //            'state'. block is the param index of the block number / tag / EIP-1898 object,
@@ -43,10 +45,10 @@ const methodProfiles = {
   // Receipts
   eth_getBlockReceipts:      { timeout: 2000, cost: 2, history: receipts(0) },
   eth_getTransactionReceipt: { timeout: 2000, history: receipts('hash') },
-  eth_feeHistory:            { compare: false, history: receipts('feeHistory') },
+  eth_feeHistory:            { compare: false, cost: 'feeHistory', history: receipts('feeHistory') },
   // Blocks, headers and transactions
-  eth_getBlockByNumber:      { timeout: 1500, history: bodies(0) },
-  eth_getBlockByHash:        { timeout: 1500, history: bodies('hash') },
+  eth_getBlockByNumber:      { timeout: 1500, cost: 2, history: bodies(0) },
+  eth_getBlockByHash:        { timeout: 1500, cost: 2, history: bodies('hash') },
   eth_getHeaderByNumber:                    { history: bodies(0) },
   eth_getHeaderByHash:                      { history: bodies('hash') },
   eth_getBlockTransactionCountByNumber:     { history: bodies(0) },
@@ -69,7 +71,7 @@ const methodProfiles = {
   eth_call:                  { history: state(1) },
   eth_estimateGas:           { history: state(1) },
   eth_createAccessList:      { history: state(1) },
-  eth_getProof:              { history: state(2) },
+  eth_getProof:              { cost: 'proofKeys', history: state(2) },
   eth_simulateV1:            { history: state(1) },
   // reth: state at the block where the sender used that nonce, found by the node
   eth_getTransactionBySenderAndNonce: { history: state('hash') },

@@ -56,14 +56,27 @@ function toBlockNumber(value, head) {
   return null;
 }
 
+const MAX_FEE_HISTORY_BLOCKS = 1024; // reth's cap on eth_feeHistory blockCount
+
 /**
- * Weight of one request in a node's in-flight load (profile `cost`; Phase 3b-2).
+ * Weight of one request in a node's in-flight load (profile `cost`; Phase 3b-2), in the units
+ * of the shared request cost table (getLogs plan D17).
  * 'range' (getLogs) = 1 + ceil(blocks / 1000), blocks capped at 10,000; a blockHash or an
- * unreadable range counts as 1 block.
+ * unreadable range counts as 1 block. 'feeHistory' = 1 + ceil(blockCount / 100), blockCount
+ * capped at 1,024. 'proofKeys' (eth_getProof) = 1 + ceil(storageKeys / 10).
  */
 function requestCost(rpcRequest, profile, head) {
-  if (profile.cost !== 'range') return profile.cost;
   const { params } = rpcRequest;
+  if (profile.cost === 'feeHistory') {
+    const raw = Array.isArray(params) ? params[0] : undefined;
+    const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && /^0x[0-9a-fA-F]+$/.test(raw) ? parseInt(raw, 16) : 1);
+    return 1 + Math.ceil(Math.min(Math.max(n, 1), MAX_FEE_HISTORY_BLOCKS) / 100);
+  }
+  if (profile.cost === 'proofKeys') {
+    const keys = Array.isArray(params) && Array.isArray(params[1]) ? params[1].length : 0;
+    return 1 + Math.ceil(keys / 10);
+  }
+  if (profile.cost !== 'range') return profile.cost;
   const filter = Array.isArray(params) ? params[0] : params?.filter;
   let blocks = 1;
   if (filter && typeof filter === 'object' && filter.blockHash === undefined && Number.isFinite(head)) {
