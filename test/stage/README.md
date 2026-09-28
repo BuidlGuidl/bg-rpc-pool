@@ -21,6 +21,7 @@ them). Each prints `PASS`/`FAIL` lines and ends with `all passed` or `N FAILED`.
 | `testS3.js` | deferred M4, M12 | 3+ nodes at the same head | getLogs never compared; `eth_call` still 1-in-20 compared; spread across nodes |
 | `testM14.js` | deferred M14 (and M18) | 2+ nodes; bgnode7 as the only one covering 25.5M | a node kept busy with getLogs gets clearly fewer light requests (power of two, 3b-3): baseline split vs split under load |
 | `test3c.js` | 3c (plan M25) | an archive reth node (floor 0) next to pruned ones (S8) | old receipts, blocks, transactions and state (by number, by hash, EIP-1898 hash) come back real 10/10 straight from the pool (3003, no proxy cache); getLogs by an old `blockHash` is retried on a deeper node; recent receipts spread over the nodes; no fallback |
+| `requestAudit.js` | bg-rpc-docs `REQUEST_AUDIT.md` | the stage edge (https://stage.mainnet.rpc.buidlguidl.com) | every method type a provider like Alchemy serves, in each flavor (tags, recent, state window, old state, old receipts, pre-merge, genesis, hashes, EIP-1898, caller errors, other namespaces, protocol cases), through the edge like a real caller. One request at a time, budgeted in the edge's rate-limit units (anonymous: 1,000 per rolling hour). `AUDIT_GROUPS=state,send` runs a subset; pass an output path for JSON |
 | `freshness-summary.sh` | 3b "Decide" (freshness) | pool log with `🧭` lines | summary of candidates at / within 1 of the highest block |
 
 Stage-specific values are hard-coded: receipt floors 25,300,000 (bgnode7) and
