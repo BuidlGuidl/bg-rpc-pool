@@ -23,8 +23,9 @@ const routingMode = 'pipeline';
 //   history  history-aware routing (Phase 3c, utils/history.js): { kind, block }. kind is the
 //            history the answer needs: 'receipts', 'bodies' (blocks, headers, transactions) or
 //            'state'. block is the param index of the block number / tag / EIP-1898 object,
-//            'hash' for lookups by hash (block unknown: retried on a deeper node after a miss),
-//            or 'filter' for getLogs (only a blockHash filter is a lookup)
+//            'hash' for lookups by hash or other lookups whose block isn't known up front
+//            (retried on a deeper node after a miss), 'filter' for getLogs (only a blockHash
+//            filter is a lookup), or 'feeHistory' (rewards need receipts back to newest - count + 1)
 const defaultMethodProfile = { timeout: nodeDefaultTimeout, retry: true, compare: true, cost: 1 };
 
 // Constant or node-specific answers, or "latest" state that legitimately differs between
@@ -42,9 +43,12 @@ const methodProfiles = {
   // Receipts
   eth_getBlockReceipts:      { timeout: 2000, cost: 2, history: receipts(0) },
   eth_getTransactionReceipt: { timeout: 2000, history: receipts('hash') },
+  eth_feeHistory:            { compare: false, history: receipts('feeHistory') },
   // Blocks, headers and transactions
   eth_getBlockByNumber:      { timeout: 1500, history: bodies(0) },
   eth_getBlockByHash:        { timeout: 1500, history: bodies('hash') },
+  eth_getHeaderByNumber:                    { history: bodies(0) },
+  eth_getHeaderByHash:                      { history: bodies('hash') },
   eth_getBlockTransactionCountByNumber:     { history: bodies(0) },
   eth_getBlockTransactionCountByHash:       { history: bodies('hash') },
   eth_getTransactionByHash:                 { history: bodies('hash') },
@@ -67,6 +71,8 @@ const methodProfiles = {
   eth_createAccessList:      { history: state(1) },
   eth_getProof:              { history: state(2) },
   eth_simulateV1:            { history: state(1) },
+  // reth: state at the block where the sender used that nonce, found by the node
+  eth_getTransactionBySenderAndNonce: { history: state('hash') },
 
   // Constant network information
   eth_chainId:               noCompare,
@@ -86,7 +92,6 @@ const methodProfiles = {
   eth_blockNumber:           noCompare,
   eth_gasPrice:              noCompare,
   eth_maxPriorityFeePerGas:  noCompare,
-  eth_feeHistory:            noCompare,
   // Mempool (inherently node-specific)
   eth_pendingTransactions:   noCompare,
   txpool_status:             noCompare,

@@ -25,6 +25,16 @@ function historyNeed(rpcRequest, profile) {
   const { kind } = spec;
 
   if (spec.block === 'hash') return { kind, byHash: true };
+  if (spec.block === 'feeHistory') {
+    // [blockCount, newestBlock, rewardPercentiles]: only rewards need receipts (headers alone
+    // serve the rest on every node), for blocks newest - count + 1 .. newest
+    const [count, newest, percentiles] = Array.isArray(params) ? params : [];
+    if (!Array.isArray(percentiles) || percentiles.length === 0) return null;
+    const n = typeof count === 'number' ? count : (typeof count === 'string' && HEX.test(count) ? parseInt(count, 16) : NaN);
+    if (newest === undefined || HEAD_TAGS.includes(newest)) return { kind, head: true };
+    if (!Number.isFinite(n) || typeof newest !== 'string' || !HEX.test(newest)) return null;
+    return { kind, block: Math.max(parseInt(newest, 16) - n + 1, 0) };
+  }
   if (spec.block === 'filter') {
     // getLogs: ranges are floor-checked by the heavy path; only a blockHash is a lookup (D11)
     const filter = Array.isArray(params) ? params[0] : params?.filter;

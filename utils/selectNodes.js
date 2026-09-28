@@ -13,6 +13,7 @@ const { historyNeed, nodeFloor, covers } = require('./history');
 //   - a request for an old block goes to nodes whose history covers it, when a fast one does (3c)
 
 const TAGS_AT_HEAD = ['latest', 'safe', 'finalized']; // always above any node's receipt floor
+const DEEPER_MARGIN = 1000; // blocks; a history retry (3c) needs a floor at least this much older
 
 function getProfile(method) {
   return { ...defaultMethodProfile, ...(methodProfiles[method] || {}) };
@@ -230,7 +231,9 @@ function selectLight(rpcRequest, profile, snapshot, random) {
   // with deeper history than the one that missed.
   const need = historyNeed(rpcRequest, profile);
   if (need && snapshot.deeperThan !== undefined) {
-    const deeper = clientsWithBlocks.filter(c => nodeFloor(c, need.kind) < snapshot.deeperThan && covers(c, need));
+    // Clearly older history only: a state floor kept as a distance moves with each node's
+    // reported head, so two identical pruned nodes a block apart would each look "deeper"
+    const deeper = clientsWithBlocks.filter(c => nodeFloor(c, need.kind) < snapshot.deeperThan - DEEPER_MARGIN && covers(c, need));
     console.log(`📜 ${rpcRequest.method} history retry (${need.kind}): ${deeper.length} of ${clientsWithBlocks.length} nodes hold older history`);
     if (!deeper.some(c => isFast(c, timing))) return { ...noClients, reason: 'no deeper history' };
     clientsWithBlocks = deeper;

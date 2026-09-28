@@ -48,6 +48,18 @@ describe('historyNeed', () => {
     expect(need('eth_getTransactionReceipt', [HASH])).toEqual({ kind: 'receipts', byHash: true });
     expect(need('eth_getTransactionByHash', [HASH])).toEqual({ kind: 'bodies', byHash: true });
   });
+  test('feeHistory: only reward percentiles need receipts, from newest - count + 1', () => {
+    expect(need('eth_feeHistory', [4, hex(20000000), [50]])).toEqual({ kind: 'receipts', block: 20000000 - 3 });
+    expect(need('eth_feeHistory', ['0x4', hex(20000000), [25, 75]])).toEqual({ kind: 'receipts', block: 20000000 - 3 });
+    expect(need('eth_feeHistory', [4, hex(20000000), []])).toBeNull();
+    expect(need('eth_feeHistory', [4, hex(20000000)])).toBeNull();
+    expect(need('eth_feeHistory', [4, 'latest', [50]])).toEqual({ kind: 'receipts', head: true });
+  });
+  test('reth lookups: headers by number / hash, tx by sender and nonce', () => {
+    expect(need('eth_getHeaderByNumber', [hex(10000000)])).toEqual({ kind: 'bodies', block: 10000000 });
+    expect(need('eth_getHeaderByHash', [HASH])).toEqual({ kind: 'bodies', byHash: true });
+    expect(need('eth_getTransactionBySenderAndNonce', ['0x1', '0x1'])).toEqual({ kind: 'state', byHash: true });
+  });
   test('getLogs: only a blockHash filter is a lookup; methods without history: null', () => {
     expect(need('eth_getLogs', [{ blockHash: HASH }])).toEqual({ kind: 'receipts', byHash: true });
     expect(need('eth_getLogs', [{ fromBlock: hex(1) }])).toBeNull();
@@ -178,6 +190,13 @@ describe('history retry (deeperThan)', () => {
     expect(reachable(r, nodes, { exclude: ['pruned1'], retry: true, deeperThan: 25800000 })).toEqual(['archive']);
   });
 
+  test('two pruned nodes a block apart are not "deeper" than each other (state distance)', () => {
+    const a = makeNode('a', { state_history: { mode: 'distance', blocks: 10064 } });
+    const b = makeNode('b', { state_history: { mode: 'distance', blocks: 10064 }, block_number: String(HEAD - 1) });
+    const r = req('eth_getTransactionBySenderAndNonce', ['0x1', '0x1']);
+    expect(reachable(r, [a, b, archive], { exclude: ['a'], retry: true, deeperThan: nodeFloor(a, 'state') })).toEqual(['archive']);
+    expect(select(r, snap([a, b], { exclude: ['a'], retry: true, deeperThan: nodeFloor(a, 'state') })).reason).toBe('no deeper history');
+  });
   test('no deeper node: error, so the first answer stands', () => {
     const r = req('eth_getTransactionReceipt', [HASH]);
     const d = select(r, snap(nodes, { exclude: ['archive'], retry: true, deeperThan: 0 }));
