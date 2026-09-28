@@ -41,6 +41,19 @@ async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io, cost
     let hasResolved = false;  // Flag to track if we've resolved with a response
     let pendingResponses = selectedSocketIds.length;  // Track remaining responses
 
+    // When no node succeeded but at least one answered with a JSON-RPC error, that error is
+    // the answer (e.g. every node says "block not found" for a future block). Replacing it
+    // with a pool code (-69003/-69006/-69007) made bg-rpc-proxy treat a caller's mistake as
+    // our failure and send it to the fallback provider (request audit, 2026-09-28).
+    const nodeErrorOr = (fallbackError) => {
+      for (const [clientId, data] of responseMap) {
+        if (data.status === 'error' && data.response?.error) {
+          return { status: 'error', data: data.response.error, respondingClientId: clientId };
+        }
+      }
+      return { status: 'error', data: fallbackError };
+    };
+
     // Determine timeout based on RPC method
     const timeout = nodeMethodSpecificTimeouts[rpcRequest.method] || nodeDefaultTimeout;
 
@@ -70,13 +83,7 @@ async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io, cost
         if (pendingResponses === 0 && !hasResolved) {
           hasResolved = true;
           console.error('All RPC sockets failed validation:', JSON.stringify(Object.fromEntries(responseMap), null, 2));
-          resolve({ 
-            status: 'error', 
-            data: {
-              code: -69007,
-              message: "All nodes have invalid sockets"
-            }
-          });
+          resolve(nodeErrorOr({ code: -69007, message: "All nodes have invalid sockets" }));
         }
         return; // Skip this client
       }
@@ -109,13 +116,7 @@ async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io, cost
           if (pendingResponses === 0 && !hasResolved) {
             hasResolved = true;
             console.error('All RPC responses timed out:', JSON.stringify(Object.fromEntries(responseMap), null, 2));
-            resolve({ 
-              status: 'error', 
-              data: {
-                code: -69006,
-                message: "All nodes timed out"
-              }
-            });
+            resolve(nodeErrorOr({ code: -69006, message: "All nodes timed out" }));
           }
         }
       }, timeout);
@@ -224,15 +225,9 @@ async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io, cost
           logCompareResults(resultsMatch, mismatchedNode, mismatchedOwner, mismatchedResults, responseMap, poolMap, rpcRequest.method, rpcRequest.params);
           
           if (!hasResolved) {
-            // If we get here and haven't resolved, it means all responses were errors
+            // If we get here and haven't resolved, no node succeeded
             hasResolved = true;
-            resolve({ 
-              status: 'error', 
-              data: {
-                code: -69003,
-                message: "All nodes failed to respond successfully"
-              }
-            });
+            resolve(nodeErrorOr({ code: -69003, message: "All nodes failed to respond successfully" }));
           }
         }
       });

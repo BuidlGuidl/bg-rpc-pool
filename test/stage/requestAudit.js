@@ -9,7 +9,9 @@
 //
 // Run: node test/stage/requestAudit.js [out.json]
 //   EDGE_URL (default https://stage.mainnet.rpc.buidlguidl.com), AUDIT_BUDGET (default 800),
-//   AUDIT_PAUSE_MS (default 300), AUDIT_GROUPS (comma list, e.g. "state,send"; default all)
+//   AUDIT_PAUSE_MS (default 300), AUDIT_GROUPS (comma list, e.g. "state,send"; default all),
+//   AUDIT_ORIGIN (send this Origin header: the edge then counts the per-origin limit,
+//   4,000 units per rolling hour, instead of the IP's 1,000; set AUDIT_BUDGET to match)
 const fs = require('fs');
 
 const EDGE = process.env.EDGE_URL || 'https://stage.mainnet.rpc.buidlguidl.com';
@@ -18,6 +20,7 @@ const PAUSE = Number(process.env.AUDIT_PAUSE_MS || 300);
 const FALLBACK_LOG = '/home/ubuntu/shared/fallbackRequests.log';
 const OUT = process.argv[2];
 const GROUPS = process.env.AUDIT_GROUPS ? process.env.AUDIT_GROUPS.split(',') : null;
+const ORIGIN = process.env.AUDIT_ORIGIN || null;
 
 const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const ENS = '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e';
@@ -33,7 +36,7 @@ const weightOf = (body) => (Array.isArray(body) ? body : [body])
   .reduce((s, r) => s + (r && WEIGHTS[r.method] ? WEIGHTS[r.method] : 1), 0);
 let spent = 0;
 
-async function send(body, { raw = false, contentType = 'application/json', method = 'POST' } = {}) {
+async function send(body, { raw = false, contentType = 'application/json', method = 'POST', headers = {} } = {}) {
   const w = raw ? 1 : weightOf(body);
   if (spent + w > BUDGET) throw new Error(`budget: ${spent} + ${w} > ${BUDGET}`);
   spent += w;
@@ -42,7 +45,7 @@ async function send(body, { raw = false, contentType = 'application/json', metho
   try {
     const res = await fetch(EDGE, {
       method,
-      headers: { 'content-type': contentType, 'user-agent': 'bg-request-audit' },
+      headers: { 'content-type': contentType, 'user-agent': 'bg-request-audit', ...(ORIGIN ? { origin: ORIGIN } : {}), ...headers },
       body: method === 'POST' ? (raw ? body : JSON.stringify(body)) : undefined,
       signal: AbortSignal.timeout(30000),
     });
@@ -333,8 +336,13 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
     return ok ? ['ok', '5 answers matched by id (string id kept, filter -32601)'] : ['PROBLEM', JSON.stringify(a).slice(0, 160)];
   });
   await test(G10, 'batch', 'empty []', [], (r) => (err(r) || r.http >= 400 ? ['ok', errText(r) || `HTTP ${r.http}`] : ['PROBLEM', JSON.stringify(r.json).slice(0, 80)]));
+  // JSON-RPC answers per item: the valid item's result and the invalid item's -32600, as an array
   await test(G10, 'batch', 'one invalid item', [{ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }, { id: 2 }],
-    (r) => ['expected', r.json ? JSON.stringify(r.json).slice(0, 110) : `HTTP ${r.http}`]);
+    (r) => (Array.isArray(r.json) && r.json.length === 2 && r.json[0].result && r.json[1].error?.code === -32600
+      ? ['ok', 'answered per item'] : ['PROBLEM', r.json ? JSON.stringify(r.json).slice(0, 110) : `HTTP ${r.http}`]));
+  await test(G10, 'batch', 'one getLogs over the range cap', [{ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: hex(head - 20000), toBlock: hex(head) }] }, { jsonrpc: '2.0', id: 2, method: 'eth_chainId', params: [] }],
+    (r) => (Array.isArray(r.json) && r.json.length === 2 && r.json[0].error?.code === -32602 && r.json[1].result
+      ? ['ok', 'answered per item'] : ['PROBLEM', `whole batch answered with one object: ${JSON.stringify(r.json).slice(0, 90)}`]));
   await test(G10, 'id', 'string id', { jsonrpc: '2.0', id: 'abc', method: 'eth_chainId', params: [] }, (r) => (r.json?.id === 'abc' && res(r) ? ['ok', 'id echoed'] : ['PROBLEM', JSON.stringify(r.json)]));
   await test(G10, 'id', 'null id', { jsonrpc: '2.0', id: null, method: 'eth_chainId', params: [] }, (r) => (res(r) ? ['ok', `id ${JSON.stringify(r.json.id)}`] : ['expected', errText(r)]));
   await test(G10, 'id', 'large numeric id', { jsonrpc: '2.0', id: 9007199254740991, method: 'eth_chainId', params: [] }, (r) => (r.json?.id === 9007199254740991 ? ['ok', 'id echoed'] : ['PROBLEM', JSON.stringify(r.json)]));
@@ -345,8 +353,12 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   await test(G10, 'jsonrpc', 'version "1.0"', { jsonrpc: '1.0', id: 1, method: 'eth_chainId', params: [] }, (r) => ['expected', errText(r)]);
   // JSON-RPC says -32700 Parse error, as JSON; an HTML error page breaks clients' error handling
   await test(G10, 'body', 'invalid JSON', '{"jsonrpc":"2.0",', (r) => (err(r)?.code === -32700 ? ['ok', errText(r)] : ['PROBLEM', `HTTP ${r.http}, not a JSON-RPC -32700: ${(r.text || '').slice(0, 40)}`]), { raw: true });
-  await test(G10, 'body', 'Content-Type text/plain', JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
-    (r) => (res(r) ? ['ok', 'served'] : ['gap', errText(r) || `HTTP ${r.http} ${r.text || ''}`]), { raw: true, contentType: 'text/plain' });
+  for (const ct of ['text/plain', 'application/x-www-form-urlencoded']) {
+    await test(G10, 'body', `Content-Type ${ct}`, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
+      (r) => (res(r) ? ['ok', 'served'] : ['PROBLEM', errText(r) || `HTTP ${r.http} ${r.text || ''}`]), { raw: true, contentType: ct });
+  }
+  await test(G10, 'size', 'body 2.5 MB (blob-sized eth_call data)', { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: '0x' + '00'.repeat(19) + '04', data: '0x' + '00'.repeat(1280000) }, 'latest'] },
+    (r) => (res(r) ? ['ok', 'served'] : ['PROBLEM', errText(r) || `HTTP ${r.http} ${r.text || ''}`]));
   await test(G10, 'size', 'large response (full block, 20M)', { jsonrpc: '2.0', id: 1, method: 'eth_getBlockByNumber', params: [hex(20000000), true] }, is.result());
 
   // ---------------------------------------------------------------- summary
