@@ -117,7 +117,9 @@ function isHistoryMiss(need, result, client) {
   }
   const error = result.data || {};
   if (need.kind === 'receipts' && need.byHash && error.code === -32001) return true; // getLogs blockHash (D11)
-  return typeof error.message === 'string' && /pruned/i.test(error.message);
+  // reth: "... is pruned", "pruned history unavailable"; geth: "historical state <root> is not
+  // available", "missing trie node"
+  return typeof error.message === 'string' && /pruned|historical state .*not available|missing trie node/i.test(error.message);
 }
 
 module.exports = { historyNeed, nodeFloor, covers, isHistoryMiss };

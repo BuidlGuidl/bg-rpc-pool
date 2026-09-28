@@ -28,6 +28,9 @@ const routingMode = 'pipeline';
 //            'hash' for lookups by hash or other lookups whose block isn't known up front
 //            (retried on a deeper node after a miss), 'filter' for getLogs (only a blockHash
 //            filter is a lookup), or 'feeHistory' (rewards need receipts back to newest - count + 1)
+//   clients  execution clients that implement the method (prefixes of execution_client, e.g.
+//            ['reth']); other nodes are skipped when a fast matching node exists. A node that
+//            still answers -32601 is retried once on a node of another client (pool.js)
 const defaultMethodProfile = { timeout: nodeDefaultTimeout, retry: true, compare: true, cost: 1 };
 
 // Constant or node-specific answers, or "latest" state that legitimately differs between
@@ -74,7 +77,11 @@ const methodProfiles = {
   eth_getProof:              { cost: 'proofKeys', history: state(2) },
   eth_simulateV1:            { history: state(1) },
   // reth: state at the block where the sender used that nonce, found by the node
-  eth_getTransactionBySenderAndNonce: { history: state('hash') },
+  eth_getTransactionBySenderAndNonce: { history: state('hash'), clients: ['reth'] },
+  // reth-only (geth v1.17.4: -32601 "does not exist/is not available")
+  eth_getAccount:            { history: state(1), clients: ['reth'] },
+  eth_getAccountInfo:        { history: state(1), clients: ['reth'] },
+  eth_callMany:              { clients: ['reth'] },
 
   // Constant network information
   eth_chainId:               noCompare,
@@ -131,7 +138,7 @@ const historyDefaults = {
   rethBodyFloor: 15500000,
   rethStateWindow: 10000,
   unknownHistoryFloor: 15537394, // the Merge
-  unknownStateWindow: 128,
+  unknownStateWindow: 127, // geth v1.17.4 (stage, 2026-09-28): state at head - 127 served, head - 128 not
 };
 
 const heavyInFlightMaxAge = 120000; // Drop in-flight entries (all methods) whose response never came back (ms)

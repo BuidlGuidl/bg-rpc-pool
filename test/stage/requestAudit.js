@@ -288,7 +288,9 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   // ---------------------------------------------------------------- sending transactions
   const G8 = 'send';
   await call(G8, 'eth_sendRawTransaction', 'malformed bytes', ['0xdeadbeef'], is.error('expected'));
-  if (oldRaw) await call(G8, 'eth_sendRawTransaction', 'replay of a mined tx (20M)', [oldRaw], is.error('expected', /nonce|known|already/i));
+  // Any node error is right here (reth: "nonce too low"; geth checks the tip first: "transaction
+  // gas price below minimum"); is.error still flags a -70000, i.e. a trip to the fallback
+  if (oldRaw) await call(G8, 'eth_sendRawTransaction', 'replay of a mined tx (20M)', [oldRaw], is.error('expected'));
   await call(G8, 'eth_sendTransaction', 'no unlocked accounts', [{ from: EOA, to: EOA }], is.error('expected'));
   await call(G8, 'eth_sign', 'no unlocked accounts', [EOA, '0x00'], is.error('expected'));
   await call(G8, 'eth_signTransaction', 'no unlocked accounts', [{ from: EOA, to: EOA }], is.error('expected'));

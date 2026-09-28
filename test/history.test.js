@@ -77,10 +77,10 @@ describe('nodeFloor', () => {
   test('archive reth (floor 0): everything from genesis', () => {
     ['receipts', 'bodies', 'state'].forEach((k) => expect(nodeFloor(archive, k)).toBe(0));
   });
-  test('other clients: post-merge bodies and receipts, 128 blocks of state', () => {
+  test('other clients: post-merge bodies and receipts, 127 blocks of state (geth v1.17.4)', () => {
     expect(nodeFloor(geth, 'receipts')).toBe(15537394);
     expect(nodeFloor(geth, 'bodies')).toBe(15537394);
-    expect(nodeFloor(geth, 'state')).toBe(HEAD - 128);
+    expect(nodeFloor(geth, 'state')).toBe(HEAD - 127);
   });
 });
 
@@ -132,6 +132,30 @@ describe('reth node with an unknown receipt floor (old client, or floor not read
   });
   test('alone in the pool: routing as before', () => {
     expect(reachable(req('eth_getBlockReceipts', [hex(20000000)]), [noFloor])).toEqual(['nofloor']);
+  });
+});
+
+describe('geth (measured v1.17.4, 2026-09-28)', () => {
+  const gethNode = makeNode('geth', { execution_client: 'geth v1.17.4', receipt_floor: undefined });
+  test('state window 127 blocks: head - 127 covered, head - 128 not', () => {
+    expect(covers(gethNode, { kind: 'state', block: HEAD - 127 })).toBe(true);
+    expect(covers(gethNode, { kind: 'state', block: HEAD - 128 })).toBe(false);
+  });
+  test('"historical state ... is not available" and "missing trie node" are history misses', () => {
+    const miss = (message) => isHistoryMiss({ kind: 'state', byHash: true }, { status: 'error', data: { code: -32000, message } }, gethNode);
+    expect(miss('historical state 1dddf24a047383a8d1a9c7474a925f4c125c66f9ae962815c1bb3 is not available')).toBe(true);
+    expect(miss('missing trie node 1234 (path )')).toBe(true);
+    expect(miss('header not found')).toBe(false);
+  });
+  test('reth-only methods skip geth when a fast reth node exists', () => {
+    for (const method of ['eth_getTransactionBySenderAndNonce', 'eth_getAccount', 'eth_getAccountInfo', 'eth_callMany']) {
+      const params = method === 'eth_getTransactionBySenderAndNonce' ? ['0x1', '0x1'] : ['0x1', 'latest'];
+      expect(reachable(req(method, params), [gethNode, pruned1])).toEqual(['pruned1']);
+    }
+    // geth alone: routing as usual (the node answers -32601)
+    expect(reachable(req('eth_getAccount', ['0x1', 'latest']), [gethNode])).toEqual(['geth']);
+    // other methods still reach geth
+    expect(reachable(req('eth_chainId', []), [gethNode, pruned1])).toEqual(['geth', 'pruned1']);
   });
 });
 
@@ -196,6 +220,13 @@ describe('history retry (deeperThan)', () => {
     const r = req('eth_getTransactionBySenderAndNonce', ['0x1', '0x1']);
     expect(reachable(r, [a, b, archive], { exclude: ['a'], retry: true, deeperThan: nodeFloor(a, 'state') })).toEqual(['archive']);
     expect(select(r, snap([a, b], { exclude: ['a'], retry: true, deeperThan: nodeFloor(a, 'state') })).reason).toBe('no deeper history');
+  });
+  test('the retry goes to the deepest history, not just any deeper node (geth + archive)', () => {
+    const gethNode = makeNode('geth', { execution_client: 'geth v1.17.4', receipt_floor: undefined });
+    const r = req('eth_getTransactionReceipt', [HASH]);
+    expect(reachable(r, [archive, gethNode, pruned1, pruned2], { exclude: ['pruned1'], retry: true, deeperThan: 25800000 })).toEqual(['archive']);
+    // without an archive node, geth is the deepest and gets the retry
+    expect(reachable(r, [gethNode, pruned1, pruned2], { exclude: ['pruned1'], retry: true, deeperThan: 25800000 })).toEqual(['geth']);
   });
   test('no deeper node: error, so the first answer stands', () => {
     const r = req('eth_getTransactionReceipt', [HASH]);

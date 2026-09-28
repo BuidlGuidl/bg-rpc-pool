@@ -250,6 +250,13 @@ function selectLight(rpcRequest, profile, snapshot, random) {
   let clientsWithBlocks = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c) && !exclude.includes(c.id));
   if (clientsWithBlocks.length === 0) return noClients;
 
+  // Methods only some clients implement (profile `clients`): skip the others when a fast
+  // matching node exists
+  if (profile.clients) {
+    const matching = clientsWithBlocks.filter(c => profile.clients.some(p => String(c.execution_client || '').startsWith(p)));
+    if (matching.some(c => isFast(c, timing))) clientsWithBlocks = matching;
+  }
+
   // History (3c): an old block goes to the nodes that hold it, if a fast one does; otherwise
   // routing is as before and the node answers what it has. A history retry takes only nodes
   // with deeper history than the one that missed.
@@ -259,8 +266,13 @@ function selectLight(rpcRequest, profile, snapshot, random) {
     // reported head, so two identical pruned nodes a block apart would each look "deeper"
     const deeper = clientsWithBlocks.filter(c => nodeFloor(c, need.kind) < snapshot.deeperThan - DEEPER_MARGIN && covers(c, need));
     console.log(`📜 ${rpcRequest.method} history retry (${need.kind}): ${deeper.length} of ${clientsWithBlocks.length} nodes hold older history`);
-    if (!deeper.some(c => isFast(c, timing))) return { ...noClients, reason: 'no deeper history' };
-    clientsWithBlocks = deeper;
+    const fastDeeper = deeper.filter(c => isFast(c, timing));
+    if (fastDeeper.length === 0) return { ...noClients, reason: 'no deeper history' };
+    // Only one retry, so it goes to the deepest history there is, not any deeper node: a geth
+    // node counts as holding receipts from the Merge but finds transactions by hash only for
+    // ~2.35M blocks, and a retry landing there came back null again (stage, 2026-09-28)
+    const deepest = Math.min(...fastDeeper.map(c => nodeFloor(c, need.kind)));
+    clientsWithBlocks = deeper.filter(c => nodeFloor(c, need.kind) <= deepest + DEEPER_MARGIN);
   } else if (need && need.block !== undefined) {
     const covering = clientsWithBlocks.filter(c => covers(c, need));
     if (covering.length < clientsWithBlocks.length) {

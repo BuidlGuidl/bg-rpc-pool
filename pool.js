@@ -433,6 +433,25 @@ const wsServerInternal = require('https').createServer(
   }
 
   if (req.url === '/requestPool' && req.method === 'POST') {
+    // A method one client doesn't implement (-32601 from the node, e.g. reth-only
+    // eth_getAccount on geth): try once more on a node running another client. The pool's own
+    // -32601 for disabled methods never reaches here (select() answers it without a node).
+    const retryOtherClient = async (rpcRequest, result) => {
+      if (result.status !== 'error' || result.data?.code !== -32601 || !result.respondingClientId) return result;
+      const client = poolMap.get(result.respondingClientId);
+      const family = String(client?.execution_client || '').split(' ')[0];
+      if (!family) return result;
+      const sameClient = Array.from(poolMap.values())
+        .filter(c => String(c.execution_client || '').split(' ')[0] === family).map(c => c.id);
+      const retry = select(rpcRequest, { ...takeSnapshot(poolMap), exclude: sameClient, retry: true });
+      if (retry.error) {
+        console.log(`🧩 ${rpcRequest.method}: not implemented on ${family}, no node running another client`);
+        return result;
+      }
+      console.log(`🧩 ${rpcRequest.method}: not implemented on ${family} (${client.id}), retrying on another client`);
+      const second = await handleRequestSingle(rpcRequest, retry.socketIds, poolMap, io, retry.heavy, retry.cost ?? 1);
+      return second.status === 'error' && second.data?.code === -69005 ? result : second;
+    };
     // History (getLogs plan 3c): a node that doesn't hold the receipts, block or state asked for
     // answers null or "pruned". Try once more on a node with deeper history for that kind; if
     // there is none, or it times out, the first answer stands.
@@ -514,6 +533,7 @@ const wsServerInternal = require('https').createServer(
             result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, null, decision.cost ?? 1, selectRetry);
           }
           if (routingMode !== 'legacy') result = await retryHistoryMiss(rpcRequest, result);
+          if (routingMode !== 'legacy') result = await retryOtherClient(rpcRequest, result);
           
           if (result.status === 'success') {
             res.statusCode = 200;
