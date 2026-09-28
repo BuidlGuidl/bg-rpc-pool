@@ -72,6 +72,57 @@ describe('nodeFloor', () => {
   });
 });
 
+describe('nodeFloor: reported body_floor and state_history (2c) win over the defaults', () => {
+  test('reported values', () => {
+    const n = makeNode('r', { body_floor: 15000000, state_history: { mode: 'distance', blocks: 20000 } });
+    expect(nodeFloor(n, 'bodies')).toBe(15000000);
+    expect(nodeFloor(n, 'state')).toBe(HEAD - 20000);
+    expect(nodeFloor(makeNode('b', { state_history: { mode: 'before', block: 25000000 } }), 'state')).toBe(25000000);
+    // a pruned-receipts node that still keeps all state
+    expect(nodeFloor(makeNode('f', { state_history: { mode: 'full' } }), 'state')).toBe(0);
+    // archive with the fields: same answers as before
+    const a = makeNode('a', { receipt_floor: 0, body_floor: 0, state_history: { mode: 'full' } });
+    ['receipts', 'bodies', 'state'].forEach((k) => expect(nodeFloor(a, k)).toBe(0));
+  });
+  test('null, missing or unfamiliar values fall back to the defaults', () => {
+    const n = makeNode('n', { body_floor: null, state_history: null });
+    expect(nodeFloor(n, 'bodies')).toBe(15500000);
+    expect(nodeFloor(n, 'state')).toBe(HEAD - 10000);
+    expect(nodeFloor(makeNode('u', { state_history: { mode: 'weird' } }), 'state')).toBe(HEAD - 10000);
+    expect(nodeFloor(makeNode('d', { state_history: { mode: 'distance' } }), 'state')).toBe(HEAD - 10000);
+  });
+  test('an archive-receipts node that reports pruned state is kept out of old state', () => {
+    const odd = makeNode('odd', { receipt_floor: 0, body_floor: 0, state_history: { mode: 'distance', blocks: 10064 } });
+    expect(reachable(req('eth_call', [{}, hex(HEAD - 50000)]), [odd, archive])).toEqual(['archive']);
+    expect(reachable(req('eth_getBlockReceipts', [hex(20000000)]), [odd, archive])).toEqual(['archive', 'odd']);
+  });
+});
+
+describe('reth node with an unknown receipt floor (old client, or floor not read yet)', () => {
+  const noFloor = makeNode('nofloor', { receipt_floor: null });
+  test('never counted as holding old receipts; bodies and state use the reth defaults', () => {
+    expect(nodeFloor(noFloor, 'receipts')).toBe(Infinity);
+    expect(nodeFloor(noFloor, 'bodies')).toBe(15500000);
+    expect(nodeFloor(noFloor, 'state')).toBe(HEAD - 10000);
+    expect(nodeFloor(makeNode('old', { receipt_floor: undefined }), 'receipts')).toBe(Infinity);
+  });
+  test('old receipts by number skip it; head tags and hash lookups still reach it', () => {
+    expect(reachable(req('eth_getBlockReceipts', [hex(20000000)]), [noFloor, archive])).toEqual(['archive']);
+    expect(reachable(req('eth_getBlockReceipts', [hex(HEAD - 5)]), [noFloor, archive])).toEqual(['archive']);
+    expect(reachable(req('eth_getBlockReceipts', ['latest']), [noFloor, archive])).toEqual(['archive', 'nofloor']);
+    expect(reachable(req('eth_getTransactionReceipt', [HASH]), [noFloor, archive])).toEqual(['archive', 'nofloor']);
+  });
+  test('its null on a lookup by hash is a miss retried on a node with a known floor', () => {
+    expect(isHistoryMiss({ kind: 'receipts', byHash: true }, { status: 'success', data: null }, noFloor)).toBe(true);
+    const d = select(req('eth_getTransactionReceipt', [HASH]),
+      snap([noFloor, archive], { exclude: ['nofloor'], retry: true, deeperThan: nodeFloor(noFloor, 'receipts') }));
+    expect(d.socketIds).toEqual([archive.wsID]);
+  });
+  test('alone in the pool: routing as before', () => {
+    expect(reachable(req('eth_getBlockReceipts', [hex(20000000)]), [noFloor])).toEqual(['nofloor']);
+  });
+});
+
 describe('selection', () => {
   const nodes = [archive, pruned1, pruned2];
 

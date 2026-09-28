@@ -47,19 +47,40 @@ function historyNeed(rpcRequest, profile) {
   return null; // Malformed: let the node reject it
 }
 
+// State floor from the check-in's `state_history` (plan 2c): null when absent or unfamiliar
+function reportedStateFloor(stateHistory, head) {
+  if (!stateHistory || typeof stateHistory !== 'object') return null;
+  if (stateHistory.mode === 'full') return 0;
+  if (stateHistory.mode === 'distance' && Number.isFinite(stateHistory.blocks)) return head - stateHistory.blocks;
+  if (stateHistory.mode === 'before' && Number.isFinite(stateHistory.block)) return stateHistory.block;
+  return null;
+}
+
 /**
- * Oldest block a node can serve for one kind of history. Reth nodes report `receipt_floor`;
- * bodies and state depth are not reported yet, so they follow the reth defaults
- * buidlguidl-client runs with (a receipt floor of 0 means an archive node). Other clients report
- * nothing and get conservative defaults.
+ * Oldest block a node can serve for one kind of history. Reth nodes report `receipt_floor`, and
+ * since 2c `body_floor` and `state_history` (read from reth's own files). Where a reth node
+ * doesn't report bodies or state, they follow the reth defaults buidlguidl-client runs with (a
+ * receipt floor of 0 means an archive node). Other clients report nothing and get conservative
+ * defaults.
  */
 function nodeFloor(client, kind) {
   const head = parseInt(client.block_number);
   const floor = client.receipt_floor;
-  if (isReth(client) && Number.isFinite(floor)) {
-    if (kind === 'receipts') return floor;
-    if (kind === 'bodies') return Math.min(floor, historyDefaults.rethBodyFloor);
-    if (kind === 'state') return floor === 0 ? 0 : head - historyDefaults.rethStateWindow;
+  if (isReth(client)) {
+    const floorKnown = Number.isFinite(floor);
+    // Unknown receipt floor (old client, or not read yet): a snapshot-synced reth node's floor
+    // can be anywhere up to ~100 days back, and below it it answers null, not an error. Never
+    // count it as holding any receipts by number; head tags and hash lookups still reach it
+    if (kind === 'receipts') return floorKnown ? floor : Infinity;
+    if (kind === 'bodies') {
+      if (Number.isFinite(client.body_floor)) return client.body_floor;
+      return floorKnown ? Math.min(floor, historyDefaults.rethBodyFloor) : historyDefaults.rethBodyFloor;
+    }
+    if (kind === 'state') {
+      const reported = reportedStateFloor(client.state_history, head);
+      if (reported !== null) return reported;
+      return floor === 0 ? 0 : head - historyDefaults.rethStateWindow;
+    }
   }
   if (kind === 'state') return head - historyDefaults.unknownStateWindow;
   return historyDefaults.unknownHistoryFloor;

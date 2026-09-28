@@ -41,6 +41,9 @@ function getPoolNodesObject(poolMap) {
       consensus_udp_port: client.consensus_udp_port || '',
       // Lowest block with receipts (reth only). null = not reported; 0 is a valid floor, so no `||`
       receipt_floor: client.receipt_floor ?? null,
+      // Lowest block with bodies/transactions, and how far back state is kept (reth only, 2c)
+      body_floor: client.body_floor ?? null,
+      state_history: client.state_history ?? null,
       // Requests in flight on this node now, and their weighted load (getLogs plan 3b-2)
       in_flight: client.id ? nodeLoad.count(client.id) : 0,
       load: client.id ? nodeLoad.load(client.id) : 0,
