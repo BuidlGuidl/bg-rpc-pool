@@ -79,6 +79,8 @@ describe('requestCost (shared cost table, plan D17)', () => {
     ['eth_feeHistory', [1024, 'latest', []], 12],
     ['eth_feeHistory', [5000, 'latest', []], 12],        // capped at 1,024
     ['eth_feeHistory', ['garbage', 'latest'], 2],
+    ['eth_feeHistory', ['1024', 'latest', []], 12],     // decimal string, as the edge reads it
+    ['eth_feeHistory', [0, 'latest', []], 1],            // 0 blocks = 1 unit, as at the edge
     ['eth_getProof', ['0x1', [], 'latest'], 1],
     ['eth_getProof', ['0x1', ['0x0'], 'latest'], 2],
     ['eth_getProof', ['0x1', Array(1000).fill('0x0'), 'latest'], 101],

@@ -58,6 +58,18 @@ function toBlockNumber(value, head) {
 
 const MAX_FEE_HISTORY_BLOCKS = 1024; // reth's cap on eth_feeHistory blockCount
 
+// Non-negative integer from a JSON-RPC quantity (number, hex or decimal string); null when
+// unreadable. Same rules as the edge's utils/requestUnits.js, so both count the same units.
+function toCount(value) {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? value : null;
+  if (typeof value === 'string') {
+    const v = value.trim();
+    if (/^0x[0-9a-fA-F]+$/.test(v)) { const n = parseInt(v, 16); return Number.isSafeInteger(n) ? n : null; }
+    if (/^\d+$/.test(v)) { const n = Number(v); return Number.isSafeInteger(n) ? n : null; }
+  }
+  return null;
+}
+
 /**
  * Weight of one request in a node's in-flight load (profile `cost`; Phase 3b-2), in the units
  * of the shared request cost table (getLogs plan D17).
@@ -68,9 +80,8 @@ const MAX_FEE_HISTORY_BLOCKS = 1024; // reth's cap on eth_feeHistory blockCount
 function requestCost(rpcRequest, profile, head) {
   const { params } = rpcRequest;
   if (profile.cost === 'feeHistory') {
-    const raw = Array.isArray(params) ? params[0] : undefined;
-    const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && /^0x[0-9a-fA-F]+$/.test(raw) ? parseInt(raw, 16) : 1);
-    return 1 + Math.ceil(Math.min(Math.max(n, 1), MAX_FEE_HISTORY_BLOCKS) / 100);
+    const n = toCount(Array.isArray(params) ? params[0] : undefined);
+    return 1 + Math.ceil(Math.min(n ?? 1, MAX_FEE_HISTORY_BLOCKS) / 100);
   }
   if (profile.cost === 'proofKeys') {
     const keys = Array.isArray(params) && Array.isArray(params[1]) ? params[1].length : 0;
