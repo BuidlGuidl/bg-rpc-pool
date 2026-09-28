@@ -1,6 +1,7 @@
 const { spotCheckOnlyThreshold, requestSetChance, slowSpotChecks, defaultMethodProfile, methodProfiles } = require('../config');
 const { getNodeTimingData } = require('./nodeTimingUtils');
 const nodeLoad = require('./nodeLoad');
+const { historyNeed, nodeFloor, covers } = require('./history');
 
 // One selection function for every method (getLogs plan Phase 3b). select() is pure: it takes a
 // snapshot of the pool and returns a decision without sending anything, so it can be tested
@@ -9,6 +10,7 @@ const nodeLoad = require('./nodeLoad');
 //   - only nodes at the exact highest block among fast nodes (owner decision 2026-09-25)
 //   - among those, power of two choices on weighted in-flight load (nodeLoad, 3b-2)
 //   - a retry selects again at retry time, without the node(s) already tried (3b-4)
+//   - a request for an old block goes to nodes whose history covers it, when a fast one does (3c)
 
 const TAGS_AT_HEAD = ['latest', 'safe', 'finalized']; // always above any node's receipt floor
 
@@ -131,7 +133,9 @@ function takeSnapshot(poolMap) {
  * @param {Object} rpcRequest
  * @param {{ nodes: Object[], timing: Object|null, heavyCounts: Object, loads?: Object, random?: Function,
  *           exclude?: string[], retry?: boolean }} snapshot
- *   exclude: node ids not to pick (already tried); retry: pick one node for a retry (no comparison)
+ *   exclude: node ids not to pick (already tried); retry: pick one node for a retry (no comparison);
+ *   deeperThan: history retry (3c), only nodes whose floor for the request's kind of history is
+ *   below this block
  * @returns {{ error: Object, reason: string } |
  *           { socketIds: string[], handler: 'single'|'set', heavy: Object|null, cost: number, reason: string }}
  */
@@ -164,9 +168,11 @@ function selectHeavy(rpcRequest, profile, snapshot, random) {
   }
   const { fromBlock } = resolved;
 
-  const checkedIn = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c));
+  const exclude = snapshot.exclude || [];
+  const checkedIn = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c) && !exclude.includes(c.id));
   const reth = checkedIn.filter(isReth);
-  const floorKnown = reth.filter(c => Number.isFinite(c.receipt_floor));
+  const floorKnown = reth.filter(c => Number.isFinite(c.receipt_floor) &&
+    (snapshot.deeperThan === undefined || c.receipt_floor < snapshot.deeperThan));
   const coversRange = fromBlock === null ? floorKnown : floorKnown.filter(c => c.receipt_floor <= fromBlock);
   // Only fast nodes serve (D13), then capacity, then the exact highest block, then power of two
   const fastCovering = coversRange.filter(c => isFast(c, snapshot.timing));
@@ -216,8 +222,28 @@ function selectLight(rpcRequest, profile, snapshot, random) {
   const noClients = { error: { code: -69000, message: "No clients connected to pool" }, reason: 'no clients' };
 
   const exclude = snapshot.exclude || [];
-  const clientsWithBlocks = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c) && !exclude.includes(c.id));
+  let clientsWithBlocks = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c) && !exclude.includes(c.id));
   if (clientsWithBlocks.length === 0) return noClients;
+
+  // History (3c): an old block goes to the nodes that hold it, if a fast one does; otherwise
+  // routing is as before and the node answers what it has. A history retry takes only nodes
+  // with deeper history than the one that missed.
+  const need = historyNeed(rpcRequest, profile);
+  if (need && snapshot.deeperThan !== undefined) {
+    const deeper = clientsWithBlocks.filter(c => nodeFloor(c, need.kind) < snapshot.deeperThan && covers(c, need));
+    console.log(`📜 ${rpcRequest.method} history retry (${need.kind}): ${deeper.length} of ${clientsWithBlocks.length} nodes hold older history`);
+    if (!deeper.some(c => isFast(c, timing))) return { ...noClients, reason: 'no deeper history' };
+    clientsWithBlocks = deeper;
+  } else if (need && need.block !== undefined) {
+    const covering = clientsWithBlocks.filter(c => covers(c, need));
+    if (covering.length < clientsWithBlocks.length) {
+      const useCovering = covering.some(c => isFast(c, timing));
+      console.log(`📜 ${rpcRequest.method} ${need.kind} at block ${need.block}: ${covering.length} of ${clientsWithBlocks.length} nodes cover it` +
+        (useCovering ? '' : ', no fast one, routing as usual'));
+      if (useCovering) clientsWithBlocks = covering;
+    }
+  }
+
   const fastNodes = clientsWithBlocks.filter(c => isFast(c, timing));
   if (fastNodes.length === 0) return { ...noClients, reason: 'only slow nodes' }; // D13
 

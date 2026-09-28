@@ -14,7 +14,8 @@ const { getPoolNodesObject } = require('./utils/getPoolNodesObject');
 const { constructNodeContinentsObject, getNodeContinentsObject } = require('./utils/getNodeContinentsObject');
 const { getRpcSiteStatsObject } = require('./utils/getRpcSiteStatsObject');
 const { getYourNodesObject } = require('./utils/getYourNodesObject');
-const { select, takeSnapshot, getHeavyStatus } = require('./utils/selectNodes');
+const { select, takeSnapshot, getHeavyStatus, getProfile } = require('./utils/selectNodes');
+const { historyNeed, nodeFloor, isHistoryMiss } = require('./utils/history');
 const { decideLegacy } = require('./utils/routeLegacy');
 const nodeLoad = require('./utils/nodeLoad');
 const { fetchNodeTimingData } = require('./utils/nodeTimingUtils');
@@ -432,6 +433,24 @@ const wsServerInternal = require('https').createServer(
   }
 
   if (req.url === '/requestPool' && req.method === 'POST') {
+    // History (getLogs plan 3c): a node that doesn't hold the receipts, block or state asked for
+    // answers null or "pruned". Try once more on a node with deeper history for that kind; if
+    // there is none, or it times out, the first answer stands.
+    const retryHistoryMiss = async (rpcRequest, result) => {
+      const need = historyNeed(rpcRequest, getProfile(rpcRequest.method));
+      const client = result.respondingClientId ? poolMap.get(result.respondingClientId) : null;
+      if (!isHistoryMiss(need, result, client)) return result;
+      const floor = nodeFloor(client, need.kind);
+      const retry = select(rpcRequest, { ...takeSnapshot(poolMap), exclude: [client.id], retry: true, deeperThan: floor });
+      if (retry.error) {
+        console.log(`📜 ${rpcRequest.method}: history miss on ${client.id} (${need.kind} floor ${floor}), no node with deeper history`);
+        return result;
+      }
+      console.log(`📜 ${rpcRequest.method}: history miss on ${client.id} (${need.kind} floor ${floor}), retrying on a node with deeper history`);
+      const second = await handleRequestSingle(rpcRequest, retry.socketIds, poolMap, io, retry.heavy, retry.cost ?? 1);
+      return second.status === 'error' && second.data?.code === -69005 ? result : second;
+    };
+
     let body = '';
     
     // Handle request errors
@@ -494,6 +513,7 @@ const wsServerInternal = require('https').createServer(
             };
             result = await handleRequestSingle(rpcRequest, decision.socketIds, poolMap, io, null, decision.cost ?? 1, selectRetry);
           }
+          if (routingMode !== 'legacy') result = await retryHistoryMiss(rpcRequest, result);
           
           if (result.status === 'success') {
             res.statusCode = 200;

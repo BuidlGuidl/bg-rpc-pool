@@ -20,6 +20,11 @@ const routingMode = 'pipeline';
 //   cost     weight of one request in a node's in-flight load (Phase 3b-2): a number, or
 //            'range' = 1 + ceil(blocks / 1000) for getLogs (10k blocks = 11). Starting values,
 //            to be tuned with data
+//   history  history-aware routing (Phase 3c, utils/history.js): { kind, block }. kind is the
+//            history the answer needs: 'receipts', 'bodies' (blocks, headers, transactions) or
+//            'state'. block is the param index of the block number / tag / EIP-1898 object,
+//            'hash' for lookups by hash (block unknown: retried on a deeper node after a miss),
+//            or 'filter' for getLogs (only a blockHash filter is a lookup)
 const defaultMethodProfile = { timeout: nodeDefaultTimeout, retry: true, compare: true, cost: 1 };
 
 // Constant or node-specific answers, or "latest" state that legitimately differs between
@@ -29,11 +34,39 @@ const noCompare = { compare: false };
 // Filter ("ticket") methods are disabled (getLogs plan D15): a filter id only exists on the
 // node that created it, and with several nodes the follow-up call usually lands elsewhere.
 // Their routing settings are kept, so deleting `disabled` re-enables them as before.
+const receipts = (block) => ({ kind: 'receipts', block });
+const bodies = (block) => ({ kind: 'bodies', block });
+const state = (block) => ({ kind: 'state', block });
+
 const methodProfiles = {
-  eth_getBlockReceipts:      { timeout: 2000, cost: 2 },
-  eth_getBlockByNumber:      { timeout: 1500 },
-  eth_getBlockByHash:        { timeout: 1500 },
-  eth_getTransactionReceipt: { timeout: 2000 },
+  // Receipts
+  eth_getBlockReceipts:      { timeout: 2000, cost: 2, history: receipts(0) },
+  eth_getTransactionReceipt: { timeout: 2000, history: receipts('hash') },
+  // Blocks, headers and transactions
+  eth_getBlockByNumber:      { timeout: 1500, history: bodies(0) },
+  eth_getBlockByHash:        { timeout: 1500, history: bodies('hash') },
+  eth_getBlockTransactionCountByNumber:     { history: bodies(0) },
+  eth_getBlockTransactionCountByHash:       { history: bodies('hash') },
+  eth_getTransactionByHash:                 { history: bodies('hash') },
+  eth_getTransactionByBlockNumberAndIndex:  { history: bodies(0) },
+  eth_getTransactionByBlockHashAndIndex:    { history: bodies('hash') },
+  eth_getRawTransactionByHash:              { history: bodies('hash') },
+  eth_getRawTransactionByBlockNumberAndIndex: { history: bodies(0) },
+  eth_getRawTransactionByBlockHashAndIndex: { history: bodies('hash') },
+  eth_getUncleCountByBlockNumber:           { history: bodies(0) },
+  eth_getUncleCountByBlockHash:             { history: bodies('hash') },
+  eth_getUncleByBlockNumberAndIndex:        { history: bodies(0) },
+  eth_getUncleByBlockHashAndIndex:          { history: bodies('hash') },
+  // State at a block
+  eth_getBalance:            { history: state(1) },
+  eth_getCode:               { history: state(1) },
+  eth_getTransactionCount:   { history: state(1) },
+  eth_getStorageAt:          { history: state(2) },
+  eth_call:                  { history: state(1) },
+  eth_estimateGas:           { history: state(1) },
+  eth_createAccessList:      { history: state(1) },
+  eth_getProof:              { history: state(2) },
+  eth_simulateV1:            { history: state(1) },
 
   // Constant network information
   eth_chainId:               noCompare,
@@ -61,7 +94,7 @@ const methodProfiles = {
   txpool_inspect:            noCompare,
 
   // Range queries
-  eth_getLogs:               { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, cost: 'range' },
+  eth_getLogs:               { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, cost: 'range', history: receipts('filter') },
 
   // Filter methods (disabled, D15)
   eth_getFilterLogs:         { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, cost: 'range', disabled: true },
@@ -80,6 +113,19 @@ const methodsToSkipComparison = profileEntries.filter(([, p]) => !p.compare).map
 const heavyMethods = Object.fromEntries(profileEntries.filter(([, p]) => p.heavy)
   .map(([method, p]) => [method, { timeout: p.timeout, retry: p.retry, maxPerNode: p.heavy.maxPerNode }]));
 const disabledMethods = profileEntries.filter(([, p]) => p.disabled).map(([method]) => method);
+
+// History each node is assumed to hold where it doesn't report it (Phase 3c, utils/history.js).
+// Reth nodes report receipt_floor; a floor of 0 is treated as an archive node (all bodies and
+// state). Measured on stage 2026-09-28, reth v2.5.0 as buidlguidl-client runs it (results
+// finding 16): pruned nodes keep bodies/headers from 15,500,000 (the static-file segment after
+// pre-merge pruning) and state for ~10,070 blocks. Other clients report nothing: assume
+// post-merge bodies and receipts (geth prunes pre-merge history by default) and 128 blocks of state.
+const historyDefaults = {
+  rethBodyFloor: 15500000,
+  rethStateWindow: 10000,
+  unknownHistoryFloor: 15537394, // the Merge
+  unknownStateWindow: 128,
+};
 
 const heavyInFlightMaxAge = 120000; // Drop in-flight entries (all methods) whose response never came back (ms)
 
@@ -129,6 +175,7 @@ const cacheableMethods = new Map([
 ]);
 
 module.exports = {
+  historyDefaults,
   portPoolPublic,
   poolPort,
   wsHeartbeatInterval,

@@ -20,11 +20,18 @@ them). Each prints `PASS`/`FAIL` lines and ends with `all passed` or `N FAILED`.
 | `testS2.js` | deferred M5–M7 | 2+ reth nodes with different floors | routing by floor coverage, capacity spill-over, `/getlogsStatus` (lowest floor, D14) |
 | `testS3.js` | deferred M4, M12 | 3+ nodes at the same head | getLogs never compared; `eth_call` still 1-in-20 compared; spread across nodes |
 | `testM14.js` | deferred M14 (and M18) | 2+ nodes; bgnode7 as the only one covering 25.5M | a node kept busy with getLogs gets clearly fewer light requests (power of two, 3b-3): baseline split vs split under load |
+| `test3c.js` | 3c (plan M25) | an archive reth node (floor 0) next to pruned ones (S8) | old receipts, blocks, transactions and state (by number, by hash, EIP-1898 hash) come back real 10/10 straight from the pool (3003, no proxy cache); getLogs by an old `blockHash` is retried on a deeper node; recent receipts spread over the nodes; no fallback |
 | `freshness-summary.sh` | 3b "Decide" (freshness) | pool log with `🧭` lines | summary of candidates at / within 1 of the highest block |
 
 Stage-specific values are hard-coded: receipt floors 25,300,000 (bgnode7) and
 25,800,000 (others) as of 2026-09-25, and the USDC / ENS addresses used for
 large and ~1 s queries. Update them if stage's nodes change.
+
+**Stale since 2026-09-28:** bgnode7 is now an archive node (floor 0), so the
+below-floor checks in `test3.js` (below floor, `earliest`, `blockHash` below floor,
+`/getlogsStatus`) and `testS2.js` (M5b, M5c, M7) fail: that history is now served.
+`testM14.js` also assumes bgnode7 is the only node covering 25.5M, which still holds.
+Everything else in them passes.
 
 Not scripted (manual steps in the plan, because they change config temporarily and
 restart the pool or proxy): the 200 ms heavy-timeout test (M3), the forced

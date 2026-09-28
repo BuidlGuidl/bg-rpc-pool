@@ -167,7 +167,8 @@ async function handleRequestSet(rpcRequest, selectedSocketIds, poolMap, io, cost
           if (response.error && ignoredErrorCodes.includes(response.error.code)) {
             if (!hasResolved) {
               hasResolved = true;
-              resolve({ status: 'error', data: response.error });
+              // respondingClientId: the history retry (3c) needs to know which node said "pruned"
+              resolve({ status: 'error', data: response.error, respondingClientId: clientId });
             }
             // Do not return here; continue to process for points, etc.
           }

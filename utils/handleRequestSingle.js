@@ -206,7 +206,8 @@ async function tryNode(rpcRequest, clientId, poolMap, io, startTime, utcTimestam
           hasResolved = true;
           resolve({ 
             status: 'error', 
-            data: response.error
+            data: response.error,
+            respondingClientId: clientId // The history retry (3c) needs to know which node said "pruned"
           });
         }
       } else if (response.result !== undefined) {
