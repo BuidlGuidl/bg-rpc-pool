@@ -18,6 +18,13 @@ const nodeLoad = require('./nodeLoad');
 
 const { nodeDefaultTimeout, nodeMethodSpecificTimeouts } = require('../config');
 
+// buidlguidl-client answers -70000 "Internal node error" when its own execution client didn't
+// answer (unreachable, crashed, or erroring): a failure of the node, like a timeout. bg-rpc-logs
+// counts these in the node's rating too (utils/metricsCalculators.js)
+function isNodeFailure(result) {
+  return result.status === 'error' && result.data?.code === -70000;
+}
+
 async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, heavyConfig = null, cost = 1, selectRetry = null) {
   const startTime = Date.now();
   const utcTimestamp = new Date().toISOString();
@@ -35,13 +42,16 @@ async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, h
   // Try first node
   const firstResult = await tryNode(rpcRequest, selectedSocketIds[0], poolMap, io, startTime, utcTimestamp, heavyConfig, cost);
   
-  // If first node succeeded or failed with non-timeout error, return immediately
-  if (firstResult.status === 'success' || firstResult.data.code !== -69005) {
+  // Success, or the node's own answer to the request (a caller's mistake, a revert...): return
+  // it. A timeout, or the client's -70000 "Internal node error" (its local execution client
+  // didn't answer: a broken node, not a bad request), is the node failing: try another node
+  // (plan M15: an instantly failing node's errors reached callers instead of being retried)
+  if (firstResult.status === 'success' || !(firstResult.data.code === -69005 || isNodeFailure(firstResult))) {
     return firstResult;
   }
 
   if (heavyConfig && !heavyConfig.retry) {
-    console.log(`❌ Node timed out on ${rpcRequest.method}; heavy methods are not retried`);
+    console.log(`❌ Node ${firstResult.data.code === -69005 ? 'timed out' : 'failed'} on ${rpcRequest.method}; heavy methods are not retried`);
     return firstResult;
   }
   
@@ -49,7 +59,7 @@ async function handleRequestSingle(rpcRequest, selectedSocketIds, poolMap, io, h
   const firstNodeId = poolMap.get(selectedSocketIds[0])?.id;
   const retrySocketId = selectRetry ? selectRetry([firstNodeId]) : selectedSocketIds[1];
   if (retrySocketId) {
-    console.log(`🔄 First node timed out, retrying with second node...`);
+    console.log(`🔄 First node ${firstResult.data.code === -69005 ? 'timed out' : 'failed (' + firstResult.data.message + ')'}, retrying with second node...`);
     const secondResult = await tryNode(rpcRequest, retrySocketId, poolMap, io, startTime, utcTimestamp, heavyConfig, cost);
     return secondResult;
   }
@@ -261,4 +271,4 @@ async function tryNode(rpcRequest, clientId, poolMap, io, startTime, utcTimestam
   });
 }
 
-module.exports = { handleRequestSingle }; 
+module.exports = { handleRequestSingle, isNodeFailure }; 
