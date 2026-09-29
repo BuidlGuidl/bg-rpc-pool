@@ -369,7 +369,8 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   try { fallback = fs.readFileSync(FALLBACK_LOG).subarray(fallbackStart).toString().split('\n').filter(Boolean); } catch { /* not on this box */ }
   const counts = results.reduce((m, r) => ({ ...m, [r.verdict]: (m[r.verdict] || 0) + 1 }), {});
   console.log(`\n${results.length} requests, ${spent} rate-limit units; ${JSON.stringify(counts)}; fallback lines during the run: ${fallback.length}`);
-  fallback.forEach((l) => console.log(`  fallback: ${l.split('|').slice(0, 6).join('|').slice(0, 160)}`));
+  // first fields of the line, legacy (timestamp first) or v2 (v2|timestamp|epoch|origin|ip|method...)
+  fallback.forEach((l) => console.log(`  fallback: ${l.split('|').slice(0, l.startsWith('v2|') ? 7 : 6).join('|').slice(0, 160)}`));
   if (OUT) fs.writeFileSync(OUT, JSON.stringify({ edge: EDGE, head, date: new Date().toISOString(), spent, counts, fallback, results }, null, 2));
   process.exit(counts.PROBLEM ? 1 : 0);
 })().catch((e) => {
