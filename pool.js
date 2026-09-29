@@ -16,6 +16,7 @@ const { getRpcSiteStatsObject } = require('./utils/getRpcSiteStatsObject');
 const { getYourNodesObject } = require('./utils/getYourNodesObject');
 const { select, takeSnapshot, getHeavyStatus, getProfile } = require('./utils/selectNodes');
 const { historyNeed, nodeFloor, isHistoryMiss } = require('./utils/history');
+const { notCacheableReason } = require('./utils/cachePolicy');
 const { decideLegacy } = require('./utils/routeLegacy');
 const nodeLoad = require('./utils/nodeLoad');
 const { fetchNodeTimingData } = require('./utils/nodeTimingUtils');
@@ -496,6 +497,14 @@ const wsServerInternal = require('https').createServer(
         const rpcRequest = JSON.parse(body);
         console.log("-----------------------------------------------------------------------------------------");
         const { jsonrpc, id, method } = rpcRequest;
+        // The routing table, the cache key and the logs all use the method name; a non-string
+        // (e.g. ["eth_getLogs"]) would be coerced to text and could pick up that method's rules
+        // (independent audit HB4)
+        if (typeof method !== 'string' || method === '') {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32600, message: "Invalid Request: method must be a non-empty string" }, id: id ?? null }));
+          return;
+        }
         console.log('📡 Received RPC request:', { jsonrpc, id, method });
 
         try {
@@ -559,9 +568,10 @@ const wsServerInternal = require('https').createServer(
           if (cacheableMethods.has(method) && shouldCache) {
             console.log(`💾 Is cacheable method and responding node is not suspicious`);
             
-            // Don't cache if result is null
-            if (result.data === null) {
-              console.log(`🚫 Not caching null result for method: ${method}`);
+            // Don't cache null results, or answers about something not in a block yet
+            const notCacheable = notCacheableReason(result.data);
+            if (notCacheable) {
+              console.log(`🚫 Not caching ${method}: ${notCacheable}`);
             } else {
               const blockNumberPosition = cacheableMethods.get(method);
               const params = rpcRequest.params || [];
