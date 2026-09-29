@@ -21,6 +21,18 @@ const nodeLogger = createBufferedFileLogger({
  * @param {string} [machineId='unknown'] - ID of the node machine
  * @param {string} [owner='unknown'] - Owner of the node
  */
+// Fields are joined with '|' and lines end with '\n', and method, params, node id and owner come
+// from callers and nodes: escape both, like bg-rpc-proxy's request logs (utils/requestLogFormat.js
+// there). An audit request with a newline in its params had split into several broken lines
+// that the logs page showed as errors.
+function escapeField(value) {
+  return String(value)
+    .replace(/%/g, '%25')
+    .replace(/\|/g, '%7C')
+    .replace(/\n/g, '%0A')
+    .replace(/\r/g, '%0D');
+}
+
 function logNode(req, startTime, utcTimestamp, duration, status, machineId = 'unknown', owner = 'unknown') {
   const { method, params } = req.body;
 
@@ -35,18 +47,18 @@ function logNode(req, startTime, utcTimestamp, duration, status, machineId = 'un
     ? safeStringify(status)
     : (status ? String(status).replace(/[\r\n\s]+/g, ' ').trim() : 'unknown');
 
-  let logEntry = `${formattedDate}|${startTime}|${machineId}|${owner}|${method}|`;
-  
+  let paramsText = '';
   if (params && Array.isArray(params)) {
-    logEntry += params.map(param => {
+    paramsText = params.map(param => {
       if (param && typeof param === 'object') {
         return safeStringify(param);
       }
       return param;
     }).join(',');
   }
-  
-  logEntry += `|${duration}|${cleanStatus}\n`;
+
+  const logEntry = `${formattedDate}|${startTime}|${escapeField(machineId)}|${escapeField(owner)}|${escapeField(method)}|` +
+    `${escapeField(paramsText)}|${duration}|${escapeField(cleanStatus)}\n`;
   nodeLogger.enqueue(logEntry);
 }
 
