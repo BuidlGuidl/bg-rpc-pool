@@ -1,3 +1,4 @@
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const { Server } = require('socket.io');
 const https = require('https');
 const fs = require('fs');
@@ -824,30 +825,37 @@ io.on('connection', (socket) => {
 let lastProcessedHour = -1;
 let lastProcessedDay = -1;
 
+// Bread (hourly processNodesForBread, daily mintBread) runs only where .env says
+// BREAD_MINTING=true: prod. Off when unset, so a stage or new machine never mints.
+const breadMinting = /^(true|on|1)$/i.test(String(process.env.BREAD_MINTING || '').trim());
+console.log(breadMinting
+  ? '🍞 Bread processing and minting ON (BREAD_MINTING=true)'
+  : '🍞 Bread processing and minting OFF (set BREAD_MINTING=true in .env to enable)');
+
 // New interval function that uses the system clock for scheduling
 // don't delete this
-// setInterval(async () => {
-//   const now = new Date();
-//   const hours = now.getHours();
-//   const minutes = now.getMinutes();
-//   const seconds = now.getSeconds();
-//   const dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / (1000 * 60 * 60 * 24));
+if (breadMinting) setInterval(async () => {
+  const now = new Date();
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  const seconds = now.getSeconds();
+  const dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / (1000 * 60 * 60 * 24));
 
-//   // At the top of every hour (minutes === 0 and within first 3 seconds for safety)
-//   if (minutes === 0 && seconds <= 2 && lastProcessedHour !== hours) {
-//     lastProcessedHour = hours;
-//     await processNodesForBread(poolMap);
-//     console.log(`🍞 Bread processing at top of hour: ${now.toISOString()}`);
+  // At the top of every hour (minutes === 0 and within first 3 seconds for safety)
+  if (minutes === 0 && seconds <= 2 && lastProcessedHour !== hours) {
+    lastProcessedHour = hours;
+    await processNodesForBread(poolMap);
+    console.log(`🍞 Bread processing at top of hour: ${now.toISOString()}`);
 
-//     // At the start of each day (hours === 0)
-//     if (hours === 0 && lastProcessedDay !== dayOfYear) {
-//       lastProcessedDay = dayOfYear;
-//       console.log('🍞 Start of day, calling mintBread()');
-//       try {
-//         await mintBread();
-//       } catch (error) {
-//         console.error('Error in mintBread:', error);
-//       }
-//     }
-//   }
-// }, 1000);
+    // At the start of each day (hours === 0)
+    if (hours === 0 && lastProcessedDay !== dayOfYear) {
+      lastProcessedDay = dayOfYear;
+      console.log('🍞 Start of day, calling mintBread()');
+      try {
+        await mintBread();
+      } catch (error) {
+        console.error('Error in mintBread:', error);
+      }
+    }
+  }
+}, 1000);
