@@ -29,6 +29,9 @@ const TOTAL_SUPPLY = '0x18160ddd';
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const UNKNOWN_HASH = '0x' + '12'.repeat(32);
 const hex = (n) => '0x' + n.toString(16);
+// The edge's answers for refused methods (bg-rpc-docs EDGE_METHOD_BLOCKLIST_PLAN.md D3)
+const NAMESPACE_REFUSED = /-32601.*namespace is not available/;
+const METHOD_REFUSED = /-32601.*is not supported on this endpoint/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const WEIGHTS = { eth_getLogs: 100, eth_getBlockByNumber: 2, eth_getBlockByHash: 2 };
@@ -160,14 +163,17 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   await call(G1, 'eth_syncing', '', [], (r) => (res(r) === false ? ['ok', 'false'] : is.result()(r)));
   await call(G1, 'net_listening', '', [], is.result());
   await call(G1, 'net_peerCount', '', [], is.result());
-  // web3_* are standard; reth serves them only with `web3` in --http.api
-  await call(G1, 'web3_clientVersion', '', [], (r) => (err(r) ? ['gap', errText(r)] : is.result()(r)));
-  await call(G1, 'web3_sha3', '', ['0x68656c6c6f'], (r) => (err(r) ? ['gap', errText(r)] : is.result((v) => v === '0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8' || 'wrong hash')(r)));
+  // web3_* are standard, but the nodes don't enable reth's web3 module: refused at the edge
+  // (bg-rpc-docs EDGE_METHOD_BLOCKLIST_PLAN.md D2, D4; was graded 'gap', F3)
+  await call(G1, 'web3_clientVersion', 'refused at the edge', [], is.error('expected', NAMESPACE_REFUSED));
+  await call(G1, 'web3_sha3', 'refused at the edge', ['0x68656c6c6f'], is.error('expected', NAMESPACE_REFUSED));
   await call(G1, 'eth_protocolVersion', '', [], is.either);
   await call(G1, 'eth_accounts', '', [], (r) => (Array.isArray(res(r)) && res(r).length === 0 ? ['ok', '[] (no accounts)'] : is.either(r)));
-  await call(G1, 'eth_coinbase', '', [], is.either);
-  await call(G1, 'eth_mining', '', [], is.either);
-  await call(G1, 'eth_hashrate', '', [], is.either);
+  // proof-of-work leftovers: refused at the edge (EDGE_METHOD_BLOCKLIST_PLAN.md D2)
+  for (const m of ['eth_coinbase', 'eth_mining', 'eth_hashrate', 'eth_getWork']) {
+    await call(G1, m, 'refused at the edge', [], is.error('expected', METHOD_REFUSED));
+  }
+  await call(G1, 'eth_submitHashrate', 'refused at the edge', ['0x01', '0x' + '00'.repeat(31) + '01'], is.error('expected', METHOD_REFUSED));
   await call(G1, 'eth_config', '', [], is.either);
 
   // ---------------------------------------------------------------- gas and fees
@@ -291,11 +297,15 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   // Any node error is right here (reth: "nonce too low"; geth checks the tip first: "transaction
   // gas price below minimum"); is.error still flags a -70000, i.e. a trip to the fallback
   if (oldRaw) await call(G8, 'eth_sendRawTransaction', 'replay of a mined tx (20M)', [oldRaw], is.error('expected'));
-  await call(G8, 'eth_sendTransaction', 'no unlocked accounts', [{ from: EOA, to: EOA }], is.error('expected'));
-  await call(G8, 'eth_sign', 'no unlocked accounts', [EOA, '0x00'], is.error('expected'));
-  await call(G8, 'eth_signTransaction', 'no unlocked accounts', [{ from: EOA, to: EOA }], is.error('expected'));
+  // no keys on the nodes: refused at the edge (EDGE_METHOD_BLOCKLIST_PLAN.md D2)
+  await call(G8, 'eth_sendTransaction', 'refused at the edge', [{ from: EOA, to: EOA }], is.error('expected', METHOD_REFUSED));
+  await call(G8, 'eth_sign', 'refused at the edge', [EOA, '0x00'], is.error('expected', METHOD_REFUSED));
+  await call(G8, 'eth_signTransaction', 'refused at the edge', [{ from: EOA, to: EOA }], is.error('expected', METHOD_REFUSED));
+  for (const m of ['eth_signTypedData', 'eth_signTypedData_v1', 'eth_signTypedData_v3', 'eth_signTypedData_v4']) {
+    await call(G8, m, 'refused at the edge', [EOA, {}], is.error('expected', METHOD_REFUSED));
+  }
   await call(G8, 'eth_fillTransaction', '', [{ from: EOA, to: EOA, value: '0x0' }], is.either);
-  await call(G8, 'eth_submitWork', 'no mining (PoS)', ['0x0000000000000001', '0x' + '00'.repeat(32), '0x' + '00'.repeat(32)], is.either);
+  await call(G8, 'eth_submitWork', 'refused at the edge', ['0x0000000000000001', '0x' + '00'.repeat(32), '0x' + '00'.repeat(32)], is.error('expected', METHOD_REFUSED));
 
   // ---------------------------------------------------------------- other namespaces
   const G9 = 'namespaces';
@@ -307,18 +317,24 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   ]) {
     await call(G9, m, 'blocked at the edge', p, is.error('expected', /-32601/));
   }
+  // Namespaces the nodes don't serve (or serve only on some clients): refused at the edge
+  // (bg-rpc-docs EDGE_METHOD_BLOCKLIST_PLAN.md D2; were graded 'gap')
   for (const [m, p] of [
     ['trace_transaction', [txOld]], ['trace_block', ['latest']], ['trace_call', [{ to: USDC, data: TOTAL_SUPPLY }, ['trace'], 'latest']],
     ['trace_filter', [{ fromBlock: hex(head - 10), toBlock: 'latest', toAddress: [USDC] }]], ['trace_replayTransaction', [txOld, ['trace']]],
     ['txpool_status', []], ['txpool_content', []], ['txpool_inspect', []],
     ['erigon_getHeaderByNumber', [hex(head - 5)]], ['erigon_forks', []],
-    ['eth_callBundle', [{ txs: [], blockNumber: hex(head), stateBlockNumber: 'latest' }]],
     ['alchemy_getTokenBalances', [EOA, 'erc20']], ['alchemy_getAssetTransfers', [{ fromBlock: hex(head - 10), category: ['erc20'] }]],
     ['alchemy_getTokenMetadata', [USDC]], ['alchemy_getTransactionReceipts', [{ blockNumber: hex(head - 5) }]],
-    ['eth_subscribe', ['newHeads']], ['eth_unsubscribe', ['0x1']],
+    ['parity_netPeers', []], ['ots_getApiLevel', []], ['proof_getTransactionByHash', [txOld, false]],
   ]) {
-    await call(G9, m, 'provider extra', p, is.either);
+    await call(G9, m, 'refused at the edge', p, is.error('expected', NAMESPACE_REFUSED));
   }
+  // Subscriptions: WebSocket only, answered at the edge (config.js wsOnlyMethods)
+  for (const [m, p] of [['eth_subscribe', ['newHeads']], ['eth_unsubscribe', ['0x1']]]) {
+    await call(G9, m, 'WebSocket only', p, is.error('expected', /-32601.*WebSocket/));
+  }
+  await call(G9, 'eth_callBundle', 'provider extra', [{ txs: [], blockNumber: hex(head), stateBlockNumber: 'latest' }], is.either);
   await call(G9, 'not_a_method', 'unknown method', [], is.error('expected', /-32601/));
 
   // ---------------------------------------------------------------- protocol flavors
