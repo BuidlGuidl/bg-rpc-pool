@@ -196,9 +196,12 @@ function selectHeavy(rpcRequest, profile, snapshot, random) {
   const exclude = snapshot.exclude || [];
   const checkedIn = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c) && !exclude.includes(c.id));
   const reth = checkedIn.filter(isReth);
-  const floorKnown = reth.filter(c => Number.isFinite(c.receipt_floor) &&
-    (snapshot.deeperThan === undefined || c.receipt_floor < snapshot.deeperThan));
-  const coversRange = fromBlock === null ? floorKnown : floorKnown.filter(c => c.receipt_floor <= fromBlock);
+  // Receipts floor as nodeFloor works it out: reported receipts, and the bodies logs need too
+  // (bg-rpc-docs F13_HISTORY_ROUTING_PLAN.md); Infinity when the node doesn't report receipts
+  const receiptsFloor = (c) => nodeFloor(c, 'receipts');
+  const floorKnown = reth.filter(c => Number.isFinite(receiptsFloor(c)) &&
+    (snapshot.deeperThan === undefined || receiptsFloor(c) < snapshot.deeperThan));
+  const coversRange = fromBlock === null ? floorKnown : floorKnown.filter(c => receiptsFloor(c) <= fromBlock);
   // Only fast nodes serve (D13), then capacity, then the exact highest block, then power of two
   const fastCovering = coversRange.filter(c => isFast(c, snapshot.timing));
   const withCapacity = fastCovering.filter(c => (snapshot.heavyCounts[c.id] || 0) < profile.heavy.maxPerNode);
@@ -228,7 +231,7 @@ function selectHeavy(rpcRequest, profile, snapshot, random) {
   }
   if (coversRange.length === 0) {
     // Retrying won't help, so this is not -32005
-    const lowestFloor = Math.min(...floorKnown.map(c => c.receipt_floor));
+    const lowestFloor = Math.min(...floorKnown.map(receiptsFloor));
     return { error: { code: -32602, message: `Logs older than block ${lowestFloor} are not available on this endpoint` }, reason: 'below floor' };
   }
   if (fastCovering.length === 0) {
@@ -356,11 +359,11 @@ function getHeavyStatus(poolMap) {
   // Slow nodes never serve getLogs (D13), so they don't count as ready
   const timing = getNodeTimingData();
   const ready = Array.from(poolMap.values()).filter(c =>
-    isCheckedIn(c) && hasValidBlock(c) && isReth(c) && Number.isFinite(c.receipt_floor) && isFast(c, timing));
+    isCheckedIn(c) && hasValidBlock(c) && isReth(c) && Number.isFinite(nodeFloor(c, 'receipts')) && isFast(c, timing));
   return {
     readyNodes: ready.length,
-    receiptFloor: ready.length > 0 ? Math.min(...ready.map(c => c.receipt_floor)) : null,
-    receiptFloorAll: ready.length > 0 ? Math.max(...ready.map(c => c.receipt_floor)) : null,
+    receiptFloor: ready.length > 0 ? Math.min(...ready.map(c => nodeFloor(c, 'receipts'))) : null,
+    receiptFloorAll: ready.length > 0 ? Math.max(...ready.map(c => nodeFloor(c, 'receipts'))) : null,
     inFlight: nodeLoad.heavyTotal(),
   };
 }

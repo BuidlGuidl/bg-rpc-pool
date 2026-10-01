@@ -462,7 +462,7 @@ const wsServerInternal = require('https').createServer(
     const retryHistoryMiss = async (rpcRequest, result) => {
       const need = historyNeed(rpcRequest, getProfile(rpcRequest.method));
       const client = result.respondingClientId ? poolMap.get(result.respondingClientId) : null;
-      if (!isHistoryMiss(need, result, client)) return result;
+      if (!isHistoryMiss(need, result, client, rpcRequest.method)) return result;
       const floor = nodeFloor(client, need.kind);
       const retry = select(rpcRequest, { ...takeSnapshot(poolMap), exclude: [client.id], retry: true, deeperThan: floor });
       if (retry.error) {

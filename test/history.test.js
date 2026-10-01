@@ -261,3 +261,67 @@ describe('isHistoryMiss', () => {
     expect(isHistoryMiss(null, { status: 'success', data: null }, pruned1)).toBe(false);
   });
 });
+
+// F13 (bg-rpc-docs F13_HISTORY_ROUTING_PLAN.md): production nodes that don't report, or misreport,
+// their history answered old receipts and logs with null or a silently wrong []
+describe('F13: receipts need bodies too; non-reporting clients; nulls for existing blocks', () => {
+  const { getHeavyStatus } = require('../utils/selectNodes');
+  // reth v1.9.3 on production: receipts from 0, bodies only from 15.5M (answered [] for 10M)
+  const damu = makeNode('damu', { execution_client: 'reth v1.9.3', receipt_floor: 0, body_floor: 15500000,
+    state_history: { mode: 'distance', blocks: 10064 } });
+  const fullArchive = makeNode('full', { receipt_floor: 0, body_floor: 0, state_history: { mode: 'full' } });
+  const nethermind = makeNode('nm', { execution_client: 'nethermind v8.1.2', receipt_floor: undefined });
+  const noClient = makeNode('nc', { execution_client: undefined, receipt_floor: undefined });
+
+  test('Phase 1: a node holds receipts only where it also holds the bodies', () => {
+    expect(nodeFloor(damu, 'receipts')).toBe(15500000);
+    expect(covers(damu, { kind: 'receipts', block: 10000000 })).toBe(false);
+    expect(covers(damu, { kind: 'receipts', block: 20000000 })).toBe(true);
+    expect(nodeFloor(fullArchive, 'receipts')).toBe(0);
+    expect(nodeFloor(archive, 'receipts')).toBe(0); // receipts 0, bodies not reported: archive
+    expect(nodeFloor(pruned1, 'receipts')).toBe(25800000); // receipts already the higher floor
+  });
+
+  test('Phase 1: pre-Merge receipts, fee rewards and getLogs ranges go only to the full archive', () => {
+    const nodes = [damu, fullArchive];
+    expect(reachable(req('eth_getBlockReceipts', [hex(10000000)]), nodes)).toEqual(['full']);
+    expect(reachable(req('eth_feeHistory', ['0x4', hex(10000000), [50]]), nodes)).toEqual(['full']);
+    expect(reachable(req('eth_getLogs', [{ fromBlock: hex(12000000), toBlock: hex(12009999) }]), nodes)).toEqual(['full']);
+    // post-Merge: both
+    expect(reachable(req('eth_getBlockReceipts', [hex(20000000)]), nodes)).toEqual(['damu', 'full']);
+    expect(reachable(req('eth_getLogs', [{ fromBlock: hex(20000000), toBlock: hex(20009999) }]), nodes)).toEqual(['damu', 'full']);
+    // the edge's getLogs floor (/getlogsStatus) uses the same floors
+    const status = getHeavyStatus(new Map([damu, pruned1].map((c) => [c.id, c])));
+    expect([status.receiptFloor, status.receiptFloorAll]).toEqual([15500000, 25800000]);
+  });
+
+  test('Phase 3 (decision B): nethermind and unknown clients hold no receipts or bodies by number; geth from the Merge', () => {
+    for (const n of [nethermind, noClient]) {
+      expect(nodeFloor(n, 'receipts')).toBe(Infinity);
+      expect(nodeFloor(n, 'bodies')).toBe(Infinity);
+      expect(nodeFloor(n, 'state')).toBe(HEAD - 127);
+    }
+    expect(nodeFloor(geth, 'receipts')).toBe(15537394);
+    expect(reachable(req('eth_getBlockReceipts', [hex(20000000)]), [nethermind, geth, fullArchive])).toEqual(['full', 'geth']);
+    // head tags and lookups by hash still reach them
+    expect(reachable(req('eth_getBlockReceipts', ['latest']), [nethermind, fullArchive])).toEqual(['full', 'nm']);
+    expect(reachable(req('eth_getTransactionReceipt', [HASH]), [nethermind, fullArchive])).toEqual(['full', 'nm']);
+  });
+
+  test('Phase 2: a null for a block at or below the node head is a miss, even where it is assumed to cover it', () => {
+    const nullAnswer = { status: 'success', data: null };
+    expect(isHistoryMiss({ kind: 'receipts', block: 20000000 }, nullAnswer, geth, 'eth_getBlockReceipts')).toBe(true);
+    expect(isHistoryMiss({ kind: 'bodies', block: HEAD }, nullAnswer, fullArchive, 'eth_getBlockByNumber')).toBe(true);
+    // above the node's head: a future block, a real answer
+    expect(isHistoryMiss({ kind: 'receipts', block: HEAD + 1 }, nullAnswer, geth, 'eth_getBlockReceipts')).toBe(false);
+    // an index past the end is a real null for a block that exists
+    for (const m of ['eth_getTransactionByBlockNumberAndIndex', 'eth_getUncleByBlockNumberAndIndex', 'eth_getRawTransactionByBlockNumberAndIndex']) {
+      expect(isHistoryMiss({ kind: 'bodies', block: 20000000 }, nullAnswer, geth, m)).toBe(false);
+    }
+    // non-null answers never are, an empty list included (it can be right: Phase 1 prevents the wrong one)
+    expect(isHistoryMiss({ kind: 'receipts', block: 20000000 }, { status: 'success', data: [] }, geth, 'eth_getBlockReceipts')).toBe(false);
+    // the retry after such a miss goes to the deepest history
+    expect(reachable(req('eth_getBlockReceipts', [hex(20000000)]), [geth, damu, fullArchive],
+      { exclude: ['geth'], retry: true, deeperThan: nodeFloor(geth, 'receipts') })).toEqual(['full']);
+  });
+});

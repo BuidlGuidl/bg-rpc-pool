@@ -129,6 +129,9 @@ const disabledMethods = profileEntries.filter(([, p]) => p.disabled).map(([metho
 // finding 16): pruned nodes keep bodies/headers from 15,500,000 (the static-file segment after
 // pre-merge pruning) and state for ~10,070 blocks. Other clients report nothing: assume
 // post-merge bodies and receipts (geth prunes pre-merge history by default) and 128 blocks of state.
+// Since 2026-10-01 (bg-rpc-docs F13_HISTORY_ROUTING_PLAN.md, owner decision B) the post-merge
+// assumption applies to geth only; other non-reporting clients (nethermind) get no by-number
+// receipts or bodies (utils/history.js nodeFloor).
 const historyDefaults = {
   rethBodyFloor: 15500000,
   rethStateWindow: 10000,

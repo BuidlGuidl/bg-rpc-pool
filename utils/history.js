@@ -12,6 +12,11 @@ const HEX = /^0x[0-9a-fA-F]+$/;
 const isHash = (v) => typeof v === 'string' && v.length === 66 && HEX.test(v);
 
 const isReth = (c) => typeof c.execution_client === 'string' && c.execution_client.startsWith('reth');
+const isGeth = (c) => typeof c.execution_client === 'string' && c.execution_client.startsWith('geth');
+
+// Methods for which null is a normal answer even for a block the node holds: an index past the
+// last transaction or uncle. For every other by-number method a null means the data is missing.
+const NULL_IS_AN_ANSWER = /AndIndex$/;
 
 /**
  * What history a request needs.
@@ -81,7 +86,14 @@ function nodeFloor(client, kind) {
     // Unknown receipt floor (old client, or not read yet): a snapshot-synced reth node's floor
     // can be anywhere up to ~100 days back, and below it it answers null, not an error. Never
     // count it as holding any receipts by number; head tags and hash lookups still reach it
-    if (kind === 'receipts') return floorKnown ? floor : Infinity;
+    if (kind === 'receipts') {
+      if (!floorKnown) return Infinity;
+      // A block's receipts list, and logs with their transaction hashes, need the block's
+      // transactions too: below its bodies floor a node answers [] (bg-rpc-docs
+      // F13_HISTORY_ROUTING_PLAN.md: reth v1.9.3 reporting receipts from 0 and bodies from
+      // 15,500,000 answered [] for block 10,000,000)
+      return Math.max(floor, nodeFloor(client, 'bodies'));
+    }
     if (kind === 'bodies') {
       if (Number.isFinite(client.body_floor)) return client.body_floor;
       return floorKnown ? Math.min(floor, historyDefaults.rethBodyFloor) : historyDefaults.rethBodyFloor;
@@ -93,7 +105,12 @@ function nodeFloor(client, kind) {
     }
   }
   if (kind === 'state') return head - historyDefaults.unknownStateWindow;
-  return historyDefaults.unknownHistoryFloor;
+  // Clients that report no history (F13, owner decision B, 2026-10-01): geth keeps the
+  // post-Merge assumption (it prunes pre-Merge history by default, and served 20,000,000
+  // correctly); any other client holds no receipts or bodies by number until it reports them
+  // (nethermind v8.1.2 answered null for receipts at 20,000,000). Head tags and lookups by hash
+  // still reach them.
+  return isGeth(client) ? historyDefaults.unknownHistoryFloor : Infinity;
 }
 
 function covers(client, need) {
@@ -105,15 +122,21 @@ function covers(client, need) {
  * deeper history tried.
  * @param {Object} result - { status, data } from handleRequestSingle/Set
  * @param {Object} client - the node that answered
+ * @param {string} [method] - the request's method (some answer null for blocks that exist)
  * @returns {boolean}
  */
-function isHistoryMiss(need, result, client) {
+function isHistoryMiss(need, result, client, method) {
   if (!need || !client) return false;
   if (result.status === 'success') {
     if (result.data !== null) return false;
-    // A lookup by hash can't be checked up front; a null for a known block is a miss only if
-    // the node that answered doesn't cover it (legitimate nulls, e.g. a future block, stay)
-    return need.byHash === true || (need.block !== undefined && !covers(client, need));
+    // A lookup by hash can't be checked up front
+    if (need.byHash === true) return true;
+    if (need.block === undefined) return false;
+    if (!covers(client, need)) return true;
+    // A null for a block at or below the node's own head: the block exists, so the node lacks
+    // the data, whatever its floor says (F13: a node assumed to cover 20,000,000 answered null).
+    // A null for a block above its head stays a real answer (a future block).
+    return need.block <= parseInt(client.block_number) && !NULL_IS_AN_ANSWER.test(method || '');
   }
   const error = result.data || {};
   if (need.kind === 'receipts' && need.byHash && error.code === -32001) return true; // getLogs blockHash (D11)
