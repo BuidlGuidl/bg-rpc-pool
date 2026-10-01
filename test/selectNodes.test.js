@@ -134,7 +134,9 @@ describe('config: profile table reproduces the old lists', () => {
     const newT = { ...config.nodeMethodSpecificTimeouts };
     delete newT.eth_getLogs; delete newT.eth_getFilterLogs;
     expect(sortObj(newT)).toEqual(sortObj(oldT));
-    expect([...config.methodsToSkipComparison].sort()).toEqual([...LEGACY_LISTS.methodsToSkipComparison].sort());
+    // Minus the profiles removed on purpose for methods the edge refuses (EDGE_METHOD_BLOCKLIST_PLAN.md Phase 2)
+    const refusedAtEdge = ['eth_mining', 'eth_hashrate', 'eth_coinbase', 'web3_clientVersion', 'web3_sha3', 'txpool_status', 'txpool_content', 'txpool_inspect'];
+    expect([...config.methodsToSkipComparison].sort()).toEqual(LEGACY_LISTS.methodsToSkipComparison.filter((m) => !refusedAtEdge.includes(m)).sort());
     expect(sortObj(config.heavyMethods)).toEqual(sortObj(LEGACY_LISTS.heavyMethods));
     expect([...config.disabledMethods].sort()).toEqual([...LEGACY_LISTS.disabledMethods].sort());
   });
@@ -147,7 +149,9 @@ describe('generated pools: 3b-3 rules, and differences from the old code only wh
     'eth_newFilter', 'eth_getFilterChanges', 'eth_newBlockFilter', 'eth_uninstallFilter'];
   const FROMS = [undefined, 'latest', 'safe', 'finalized', 'earliest', 'pending', hex(24000000), hex(25300000),
     hex(25500000), hex(25800000), hex(HEAD - 100), '12345', 42];
-  const COMPARE = new Set(['eth_call', 'eth_getBalance', 'eth_getBlockReceipts', 'eth_getBlockByNumber', 'unknown_method']);
+  // txpool_status has no profile since the edge refuses it (EDGE_METHOD_BLOCKLIST_PLAN.md Phase 2):
+  // routed like any unknown method
+  const COMPARE = new Set(['eth_call', 'eth_getBalance', 'eth_getBlockReceipts', 'eth_getBlockByNumber', 'unknown_method', 'txpool_status']);
 
   function randomPool(r, caseId) {
     const n = Math.floor(r() * 11);

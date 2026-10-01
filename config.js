@@ -44,6 +44,9 @@ const receipts = (block) => ({ kind: 'receipts', block });
 const bodies = (block) => ({ kind: 'bodies', block });
 const state = (block) => ({ kind: 'state', block });
 
+// Not listed on purpose: methods the edge refuses (bg-rpc-docs EDGE_METHOD_BLOCKLIST_PLAN.md D2:
+// trace_*, txpool_*, web3_*, the proof-of-work and account methods...). A method without a profile
+// isn't retried on another client after a -32601 (utils/clientRetry.js).
 const methodProfiles = {
   // Receipts
   eth_getBlockReceipts:      { timeout: 2000, cost: 2, history: receipts(0) },
@@ -90,22 +93,14 @@ const methodProfiles = {
   // Node-specific state (not consensus data)
   eth_accounts:              noCompare,
   eth_syncing:               noCompare,
-  eth_mining:                noCompare,
-  eth_hashrate:              noCompare,
-  eth_coinbase:              noCompare,
   net_listening:             noCompare,
   net_peerCount:             noCompare,
-  web3_clientVersion:        noCompare,
-  web3_sha3:                 noCompare, // Pure function, not state
   // Time-sensitive "latest" state
   eth_blockNumber:           noCompare,
   eth_gasPrice:              noCompare,
   eth_maxPriorityFeePerGas:  noCompare,
   // Mempool (inherently node-specific)
   eth_pendingTransactions:   noCompare,
-  txpool_status:             noCompare,
-  txpool_content:            noCompare,
-  txpool_inspect:            noCompare,
 
   // Range queries
   eth_getLogs:               { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, cost: 'range', history: receipts('filter') },

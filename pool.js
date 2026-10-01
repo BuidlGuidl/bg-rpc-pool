@@ -16,6 +16,7 @@ const { constructNodeContinentsObject, getNodeContinentsObject } = require('./ut
 const { getRpcSiteStatsObject } = require('./utils/getRpcSiteStatsObject');
 const { getYourNodesObject } = require('./utils/getYourNodesObject');
 const { select, takeSnapshot, getHeavyStatus, getProfile } = require('./utils/selectNodes');
+const { shouldRetryOnOtherClient } = require('./utils/clientRetry');
 const { historyNeed, nodeFloor, isHistoryMiss } = require('./utils/history');
 const { notCacheableReason } = require('./utils/cachePolicy');
 const { decideLegacy } = require('./utils/routeLegacy');
@@ -436,10 +437,11 @@ const wsServerInternal = require('https').createServer(
 
   if (req.url === '/requestPool' && req.method === 'POST') {
     // A method one client doesn't implement (-32601 from the node, e.g. reth-only
-    // eth_getAccount on geth): try once more on a node running another client. The pool's own
-    // -32601 for disabled methods never reaches here (select() answers it without a node).
+    // eth_getAccount on geth): try once more on a node running another client, for methods the
+    // pool routes on purpose only (utils/clientRetry.js). The pool's own -32601 for disabled
+    // methods never reaches here (select() answers it without a node).
     const retryOtherClient = async (rpcRequest, result) => {
-      if (result.status !== 'error' || result.data?.code !== -32601 || !result.respondingClientId) return result;
+      if (!shouldRetryOnOtherClient(rpcRequest, result)) return result;
       const client = poolMap.get(result.respondingClientId);
       const family = String(client?.execution_client || '').split(' ')[0];
       if (!family) return result;
