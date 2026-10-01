@@ -26,6 +26,7 @@ const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const ENS = '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e';
 const EOA = '0x28C6c06298d514Db089934071355E5743bf21d60'; // busy exchange account
 const TOTAL_SUPPLY = '0x18160ddd';
+const ENS_LOGS_12M = 2274; // ENS registry logs in blocks 12,000,000–12,009,999 (archive node, 2026-10-01)
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const UNKNOWN_HASH = '0x' + '12'.repeat(32);
 const hex = (n) => '0x' + n.toString(16);
@@ -236,7 +237,7 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
     await call(G4, 'eth_getBlockReceipts', flavor, [hex(b.n)], is.result((v) => v.length === b.txCount || `${v.length} receipts != ${b.txCount} txs`));
   }
   await call(G4, 'eth_getBlockReceipts', 'by block hash (20M)', [blocks['old receipts (20M)'].hash], is.result((v) => v.length === blocks['old receipts (20M)'].txCount || 'wrong count'));
-  await call(G4, 'eth_getBlockReceipts', 'EIP-1898 {blockNumber} (20M)', [{ blockNumber: hex(20000000) }], is.result());
+  await call(G4, 'eth_getBlockReceipts', 'EIP-1898 {blockNumber} (20M)', [{ blockNumber: hex(20000000) }], is.result((v) => v.length === blocks['old receipts (20M)'].txCount || 'wrong count'));
   await call(G4, 'eth_getBlockReceipts', 'future (head+1000)', [hex(head + 1000)], is.nullResult);
 
   // ---------------------------------------------------------------- state
@@ -272,7 +273,11 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   await call(G5, 'eth_simulateV1', 'latest', [{ blockStateCalls: [{ calls: [{ to: USDC, data: TOTAL_SUPPLY }] }] }, 'latest'], is.result());
   await call(G5, 'eth_simulateV1', 'old receipts (20M)', [{ blockStateCalls: [{ calls: [{ to: USDC, data: TOTAL_SUPPLY }] }] }, hex(20000000)], is.result());
   await call(G5, 'eth_getProof', 'latest', [USDC, ['0x0'], 'latest'], is.result());
-  await call(G5, 'eth_getProof', 'head-100 (historical)', [USDC, ['0x0'], hex(head - 100)], is.error('expected', /proof window/));
+  // Recent history: reth with --rpc.eth-proof-window 0 refuses it (F11); other nodes serve a proof
+  // for recent blocks (geth: 127, G6; seen from reth v2.5.0 and nethermind on production 2026-10-01)
+  await call(G5, 'eth_getProof', 'head-100 (historical)', [USDC, ['0x0'], hex(head - 100)], (r) => (err(r)
+    ? is.error('expected', /proof window/)(r)
+    : is.result((v) => (Array.isArray(v.accountProof) && v.accountProof.length > 0 && String(v.address).toLowerCase() === USDC.toLowerCase()) || 'not a proof for the address')(r)));
   await call(G5, 'eth_getAccount', 'latest', [USDC, 'latest'], is.either);
   await call(G5, 'eth_getAccount', 'old (20M, historical)', [USDC, hex(20000000)], is.error('expected', /proof window/));
   await call(G5, 'eth_getAccountInfo', 'latest', [USDC, 'latest'], is.either);
@@ -281,8 +286,11 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   // ---------------------------------------------------------------- logs (100 units each)
   const G6 = 'logs';
   await call(G6, 'eth_getLogs', 'recent 100 blocks, USDC Transfer', [{ address: USDC, topics: [TRANSFER_TOPIC], fromBlock: hex(head - 100), toBlock: 'latest' }], is.result((v) => Array.isArray(v) || 'not a list'));
-  await call(G6, 'eth_getLogs', 'archive range (12.0M, 10k blocks), ENS', [{ address: ENS, fromBlock: hex(12000000), toBlock: hex(12009999) }], is.result((v) => Array.isArray(v) || 'not a list'));
-  await call(G6, 'eth_getLogs', 'blockHash (20M), USDC', [{ address: USDC, blockHash: blocks['old receipts (20M)'].hash }], is.result((v) => Array.isArray(v) || 'not a list'));
+  // Closed past ranges never change: an empty list here is a wrong answer, not "no logs"
+  // (bg-rpc-docs F13_HISTORY_ROUTING_PLAN.md: a node without the bodies answered [] for this range;
+  // the archive node's answer, 2026-10-01, is 2,274 logs)
+  await call(G6, 'eth_getLogs', 'archive range (12.0M, 10k blocks), ENS', [{ address: ENS, fromBlock: hex(12000000), toBlock: hex(12009999) }], is.result((v) => (Array.isArray(v) && v.length === ENS_LOGS_12M) || `${Array.isArray(v) ? v.length : 'not a list'} logs != ${ENS_LOGS_12M}`));
+  await call(G6, 'eth_getLogs', 'blockHash (20M), USDC', [{ address: USDC, blockHash: blocks['old receipts (20M)'].hash }], is.result((v) => (Array.isArray(v) && v.length > 0) || 'no logs (USDC has transfers in this block)'));
 
   // ---------------------------------------------------------------- filters (disabled, D15)
   const G7 = 'filters';
