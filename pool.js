@@ -15,7 +15,7 @@ const { getPoolNodesObject } = require('./utils/getPoolNodesObject');
 const { constructNodeContinentsObject, getNodeContinentsObject } = require('./utils/getNodeContinentsObject');
 const { getRpcSiteStatsObject } = require('./utils/getRpcSiteStatsObject');
 const { getYourNodesObject } = require('./utils/getYourNodesObject');
-const { select, takeSnapshot, getHeavyStatus, getProfile } = require('./utils/selectNodes');
+const { select, takeSnapshot, getHeavyStatus, getProfile, getNamespaceCounts } = require('./utils/selectNodes');
 const { shouldRetryOnOtherClient } = require('./utils/clientRetry');
 const { historyNeed, nodeFloor, isHistoryMiss } = require('./utils/history');
 const { notCacheableReason } = require('./utils/cachePolicy');
@@ -204,7 +204,8 @@ const wsServerInternal = require('https').createServer(
   res.setHeader('X-XSS-Protection', '1; mode=block');
   
   if (req.url === '/getlogsStatus' && req.method === 'GET') {
-    const response = JSON.stringify(getHeavyStatus(poolMap));
+    // namespaces: checked-in nodes serving each RPC namespace (NAMESPACE_ROUTING_PLAN.md 1e)
+    const response = JSON.stringify({ ...getHeavyStatus(poolMap), namespaces: getNamespaceCounts(poolMap) });
     res.writeHead(200, {
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(response)

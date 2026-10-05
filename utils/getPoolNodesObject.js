@@ -13,6 +13,7 @@ const nodeLoad = require('./nodeLoad');
  *   - Network addresses (enode, peerid, enr)
  *   - Port configuration (consensus_tcp_port, consensus_udp_port)
  *   - getLogs readiness (receipt_floor; reth nodes only, null if not reported)
+ *   - RPC namespaces served (rpc_modules; null if not reported)
  *   - Current load (in_flight requests, weighted load)
  *   - Connection info (socket_id)
  *   - Ownership (owner)
@@ -44,6 +45,8 @@ function getPoolNodesObject(poolMap) {
       // Lowest block with bodies/transactions, and how far back state is kept (reth only, 2c)
       body_floor: client.body_floor ?? null,
       state_history: client.state_history ?? null,
+      // RPC namespaces served on 8545, as reported (null = not reported; routing then assumes eth, net)
+      rpc_modules: Array.isArray(client.rpc_modules) ? client.rpc_modules : null,
       // Requests in flight on this node now, and their weighted load (getLogs plan 3b-2)
       in_flight: client.id ? nodeLoad.count(client.id) : 0,
       load: client.id ? nodeLoad.load(client.id) : 0,

@@ -45,8 +45,10 @@ const bodies = (block) => ({ kind: 'bodies', block });
 const state = (block) => ({ kind: 'state', block });
 
 // Not listed on purpose: methods the edge refuses (bg-rpc-docs EDGE_METHOD_BLOCKLIST_PLAN.md D2:
-// trace_*, txpool_*, web3_*, the proof-of-work and account methods...). A method without a profile
+// trace_*, txpool_*, the proof-of-work and account methods...). A method without a profile
 // isn't retried on another client after a -32601 (utils/clientRetry.js).
+// Methods outside eth_/net_ go only to nodes reporting their namespace in rpc_modules
+// (utils/selectNodes.js; bg-rpc-docs NAMESPACE_ROUTING_PLAN.md).
 const methodProfiles = {
   // Receipts
   eth_getBlockReceipts:      { timeout: 2000, cost: 2, history: receipts(0) },
@@ -101,6 +103,9 @@ const methodProfiles = {
   eth_maxPriorityFeePerGas:  noCompare,
   // Mempool (inherently node-specific)
   eth_pendingTransactions:   noCompare,
+  // web3 namespace (NAMESPACE_ROUTING_PLAN.md): the edge still refuses web3_* (EDGE_METHOD_BLOCKLIST_PLAN.md D4)
+  web3_clientVersion:        noCompare, // differs per node
+  web3_sha3:                 noCompare, // same everywhere; comparing adds nothing
 
   // Range queries
   eth_getLogs:               { timeout: 5000, retry: false, compare: false, heavy: { maxPerNode: 4 }, cost: 'range', history: receipts('filter') },

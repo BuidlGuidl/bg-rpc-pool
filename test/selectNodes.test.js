@@ -134,8 +134,9 @@ describe('config: profile table reproduces the old lists', () => {
     const newT = { ...config.nodeMethodSpecificTimeouts };
     delete newT.eth_getLogs; delete newT.eth_getFilterLogs;
     expect(sortObj(newT)).toEqual(sortObj(oldT));
-    // Minus the profiles removed on purpose for methods the edge refuses (EDGE_METHOD_BLOCKLIST_PLAN.md Phase 2)
-    const refusedAtEdge = ['eth_mining', 'eth_hashrate', 'eth_coinbase', 'web3_clientVersion', 'web3_sha3', 'txpool_status', 'txpool_content', 'txpool_inspect'];
+    // Minus the profiles removed on purpose for methods the edge refuses (EDGE_METHOD_BLOCKLIST_PLAN.md Phase 2).
+    // web3_* has profiles again for namespace routing (NAMESPACE_ROUTING_PLAN.md)
+    const refusedAtEdge = ['eth_mining', 'eth_hashrate', 'eth_coinbase', 'txpool_status', 'txpool_content', 'txpool_inspect'];
     expect([...config.methodsToSkipComparison].sort()).toEqual(LEGACY_LISTS.methodsToSkipComparison.filter((m) => !refusedAtEdge.includes(m)).sort());
     expect(sortObj(config.heavyMethods)).toEqual(sortObj(LEGACY_LISTS.heavyMethods));
     expect([...config.disabledMethods].sort()).toEqual([...LEGACY_LISTS.disabledMethods].sort());
@@ -144,14 +145,14 @@ describe('config: profile table reproduces the old lists', () => {
 
 describe('generated pools: 3b-3 rules, and differences from the old code only where D13 allows', () => {
   const METHODS = ['eth_call', 'eth_getBalance', 'eth_blockNumber', 'eth_chainId', 'eth_getBlockReceipts',
-    'eth_getBlockByNumber', 'net_version', 'txpool_status', 'unknown_method',
+    'eth_getBlockByNumber', 'net_version', 'eth_unknownMethod', 'net_unknownMethod',
     'eth_getLogs', 'eth_getLogs', 'eth_getLogs', 'eth_getLogs',
     'eth_newFilter', 'eth_getFilterChanges', 'eth_newBlockFilter', 'eth_uninstallFilter'];
   const FROMS = [undefined, 'latest', 'safe', 'finalized', 'earliest', 'pending', hex(24000000), hex(25300000),
     hex(25500000), hex(25800000), hex(HEAD - 100), '12345', 42];
-  // txpool_status has no profile since the edge refuses it (EDGE_METHOD_BLOCKLIST_PLAN.md Phase 2):
-  // routed like any unknown method
-  const COMPARE = new Set(['eth_call', 'eth_getBalance', 'eth_getBlockReceipts', 'eth_getBlockByNumber', 'unknown_method', 'txpool_status']);
+  // Methods without a profile, in namespaces every node serves (eth_, net_): routed with the default
+  // profile. Other namespaces go only to nodes reporting them (namespace routing tests below)
+  const COMPARE = new Set(['eth_call', 'eth_getBalance', 'eth_getBlockReceipts', 'eth_getBlockByNumber', 'eth_unknownMethod', 'net_unknownMethod']);
 
   function randomPool(r, caseId) {
     const n = Math.floor(r() * 11);
@@ -435,6 +436,80 @@ describe('fixed cases', () => {
       const skip = decideBoth(poolOf(nodes), { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }, timing, s).pipeline;
       expect(skip.handler).toBe('single');
     }
+  });
+});
+
+describe('namespace routing (NAMESPACE_ROUTING_PLAN.md)', () => {
+  const web3 = { jsonrpc: '2.0', id: 1, method: 'web3_clientVersion', params: [] };
+  const call = { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] };
+  const pick = (pool, request, seed, extra = {}) => {
+    setNodeTimingData(null);
+    return withSeed(seed, () => select(request, { ...takeSnapshot(pool), ...extra }));
+  };
+
+  test('only nodes reporting web3 serve web3_*, first attempt and retries', () => {
+    const nodes = [
+      makeNode('a', { rpc_modules: ['eth', 'net', 'web3'] }),
+      makeNode('b', { rpc_modules: ['eth', 'net', 'web3'] }),
+      makeNode('c', { rpc_modules: ['eth', 'net'] }),
+      makeNode('d'),
+    ];
+    for (let s = 0; s < 200; s++) {
+      expect(['ws-a', 'ws-b']).toContain(pick(poolOf(nodes), web3, s).socketIds[0]);
+      expect(pick(poolOf(nodes), web3, s, { exclude: ['a'], retry: true }).socketIds).toEqual(['ws-b']);
+    }
+    const noneLeft = pick(poolOf(nodes), web3, 1, { exclude: ['a', 'b'], retry: true });
+    expect(noneLeft.error.code).toBe(-32601);
+  });
+
+  test('missing, null and malformed rpc_modules count as eth and net only', () => {
+    for (const rpc_modules of [undefined, null, 'web3', { web3: true }]) {
+      const pool = poolOf([makeNode('a', { rpc_modules }), makeNode('b', { rpc_modules })]);
+      const d = pick(pool, web3, 1);
+      expect(d.error).toEqual({ code: -32601, message: 'web3_clientVersion is not supported on this endpoint' });
+      expect(d.socketIds).toBeUndefined();
+      expect(pick(pool, call, 1).socketIds).toBeDefined();
+    }
+  });
+
+  test('any namespace outside eth_/net_ follows the same rule, profile or not', () => {
+    const pool = poolOf([makeNode('a', { rpc_modules: ['eth', 'net', 'txpool'] }), makeNode('b'), makeNode('c')]);
+    for (let s = 0; s < 50; s++) {
+      expect(pick(pool, { jsonrpc: '2.0', id: 1, method: 'txpool_status', params: [] }, s).socketIds).toEqual(['ws-a']);
+    }
+    for (const method of ['web3_sha3', 'rpc_modules', 'reth_getBalanceChangesInBlock', 'nonamespace']) {
+      expect(pick(pool, { jsonrpc: '2.0', id: 1, method, params: [] }, 1).error.code).toBe(-32601);
+    }
+  });
+
+  test('a node reporting web3 that is not checked in does not count', () => {
+    const pool = poolOf([makeNode('a', { rpc_modules: ['eth', 'net', 'web3'], suspicious: true }), makeNode('b')]);
+    expect(pick(pool, web3, 1).error.code).toBe(-32601);
+  });
+
+  test('eth_ and net_ routing is unchanged, even for nodes reporting a list without them', () => {
+    const plain = ['a', 'b', 'c', 'd'].map((id) => makeNode(id));
+    const reporting = [
+      makeNode('a', { rpc_modules: ['web3'] }), makeNode('b', { rpc_modules: ['eth', 'net', 'web3'] }),
+      makeNode('c', { rpc_modules: null }), makeNode('d'),
+    ];
+    for (let s = 0; s < 200; s++) {
+      for (const method of ['eth_call', 'net_version']) {
+        const request = { jsonrpc: '2.0', id: 1, method, params: [] };
+        expect(strip(pick(poolOf(reporting), request, s))).toEqual(strip(pick(poolOf(plain), request, s)));
+      }
+    }
+  });
+
+  test('namespace counts: checked-in nodes only; non-reporting nodes count as eth and net', () => {
+    const { getNamespaceCounts } = require('../utils/selectNodes');
+    const pool = poolOf([
+      makeNode('a', { rpc_modules: ['eth', 'net', 'web3'] }),
+      makeNode('b', { rpc_modules: null }),
+      makeNode('c'),
+      makeNode('d', { rpc_modules: ['eth', 'net', 'web3'], suspicious: true }),
+    ]);
+    expect(getNamespaceCounts(pool)).toEqual({ eth: 3, net: 3, web3: 1 });
   });
 });
 

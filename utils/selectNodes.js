@@ -11,9 +11,21 @@ const { historyNeed, nodeFloor, covers } = require('./history');
 //   - among those, power of two choices on weighted in-flight load (nodeLoad, 3b-2)
 //   - a retry selects again at retry time, without the node(s) already tried (3b-4)
 //   - a request for an old block goes to nodes whose history covers it, when a fast one does (3c)
+//   - a method outside eth_/net_ goes only to nodes reporting its namespace in rpc_modules
+//     (bg-rpc-docs NAMESPACE_ROUTING_PLAN.md); none → -32601
 
 const TAGS_AT_HEAD = ['latest', 'safe', 'finalized']; // always above any node's receipt floor
 const DEEPER_MARGIN = 1000; // blocks; a history retry (3c) needs a floor at least this much older
+
+// Namespaces every node is assumed to serve, whether or not it reports rpc_modules (missing,
+// null until the client's probe has run, or malformed) (NAMESPACE_ROUTING_PLAN.md D1)
+const DEFAULT_NAMESPACES = ['eth', 'net'];
+
+function servesNamespace(client, namespace) {
+  if (DEFAULT_NAMESPACES.includes(namespace)) return true;
+  const reported = client.rpc_modules;
+  return Array.isArray(reported) && reported.includes(namespace);
+}
 
 function getProfile(method) {
   return { ...defaultMethodProfile, ...(methodProfiles[method] || {}) };
@@ -173,6 +185,22 @@ function select(rpcRequest, snapshot) {
       error: { code: -32601, message: `${rpcRequest.method} is not supported on this endpoint; use eth_getLogs` },
       reason: 'disabled',
     };
+  }
+  // Namespace (D1, D2): only nodes that serve it, as reported in rpc_modules. Skipped for eth_ and
+  // net_, which every node serves, so their routing is unchanged.
+  const namespace = String(rpcRequest.method || '').split('_')[0];
+  if (!DEFAULT_NAMESPACES.includes(namespace)) {
+    const serving = snapshot.nodes.filter(c => servesNamespace(c, namespace));
+    const exclude = snapshot.exclude || [];
+    const live = serving.filter(c => isCheckedIn(c) && hasValidBlock(c) && !exclude.includes(c.id));
+    console.log(`🏷️ ${rpcRequest.method}: ${live.length} checked-in node(s) serve ${namespace}`);
+    if (live.length === 0) {
+      return {
+        error: { code: -32601, message: `${rpcRequest.method} is not supported on this endpoint` },
+        reason: 'namespace not served',
+      };
+    }
+    snapshot = { ...snapshot, nodes: serving };
   }
   const decision = profile.heavy
     ? selectHeavy(rpcRequest, profile, snapshot, random)
@@ -368,4 +396,20 @@ function getHeavyStatus(poolMap) {
   };
 }
 
-module.exports = { select, takeSnapshot, getProfile, resolveFromBlock, requestCost, powerOfTwo, getHeavyStatus };
+/**
+ * Checked-in nodes serving each namespace, for /getlogsStatus (NAMESPACE_ROUTING_PLAN.md 1e):
+ * e.g. { eth: 14, net: 14, web3: 2 }. Non-reporting nodes count as eth and net.
+ */
+function getNamespaceCounts(poolMap) {
+  const counts = {};
+  for (const c of poolMap.values()) {
+    if (!isCheckedIn(c) || !hasValidBlock(c)) continue;
+    const reported = Array.isArray(c.rpc_modules) ? c.rpc_modules.filter(m => typeof m === 'string') : [];
+    for (const namespace of new Set([...DEFAULT_NAMESPACES, ...reported])) {
+      counts[namespace] = (counts[namespace] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
+module.exports = { select, takeSnapshot, getProfile, resolveFromBlock, requestCost, powerOfTwo, getHeavyStatus, getNamespaceCounts };

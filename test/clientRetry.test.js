@@ -14,7 +14,7 @@ describe('shouldRetryOnOtherClient', () => {
   });
 
   test('a method without a profile keeps the first answer (not shopped to geth or nethermind)', () => {
-    for (const method of ['txpool_status', 'trace_block', 'web3_clientVersion', 'parity_netPeers', 'some_futureMethod', 'eth_coinbase']) {
+    for (const method of ['txpool_status', 'trace_block', 'parity_netPeers', 'some_futureMethod', 'eth_coinbase']) {
       expect(shouldRetryOnOtherClient({ method }, notFound)).toBe(false);
     }
   });
@@ -28,8 +28,14 @@ describe('shouldRetryOnOtherClient', () => {
   });
 
   test('methods the edge refuses have no profile', () => {
-    for (const method of ['txpool_status', 'txpool_content', 'txpool_inspect', 'web3_clientVersion', 'web3_sha3', 'eth_mining', 'eth_coinbase', 'eth_hashrate']) {
+    for (const method of ['txpool_status', 'txpool_content', 'txpool_inspect', 'eth_mining', 'eth_coinbase', 'eth_hashrate']) {
       expect(Object.prototype.hasOwnProperty.call(methodProfiles, method)).toBe(false);
+    }
+  });
+
+  test('web3_* has a profile (namespace routing, NAMESPACE_ROUTING_PLAN.md): a node -32601 is retried', () => {
+    for (const method of ['web3_clientVersion', 'web3_sha3']) {
+      expect(shouldRetryOnOtherClient({ method }, notFound)).toBe(true);
     }
   });
 });
