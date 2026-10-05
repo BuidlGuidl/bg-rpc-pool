@@ -182,6 +182,7 @@ const cacheableMethods = new Map([
   ['eth_getStorageAt', 2],
   
   // Methods with no block number parameter (hash-based or transaction-based)
+  ['eth_chainId', null], // refills the proxy's cache after a proxy restart (updateCache sends it only once per pool process)
   ['eth_getBlockByHash', null],
   ['eth_getBlockTransactionCountByHash', null],
   ['eth_getUncleCountByBlockHash', null],
