@@ -164,10 +164,13 @@ const call = (group, method, flavor, params, check) => test(group, method, flavo
   await call(G1, 'eth_syncing', '', [], (r) => (res(r) === false ? ['ok', 'false'] : is.result()(r)));
   await call(G1, 'net_listening', '', [], is.result());
   await call(G1, 'net_peerCount', '', [], is.result());
-  // web3_* are standard, but the nodes don't enable reth's web3 module: refused at the edge
-  // (bg-rpc-docs EDGE_METHOD_BLOCKLIST_PLAN.md D2, D4; was graded 'gap', F3)
-  await call(G1, 'web3_clientVersion', 'refused at the edge', [], is.error('expected', NAMESPACE_REFUSED));
-  await call(G1, 'web3_sha3', 'refused at the edge', ['0x68656c6c6f'], is.error('expected', NAMESPACE_REFUSED));
+  // web3_*: served by the nodes reporting web3 in rpc_modules (bg-rpc-docs NAMESPACE_ROUTING_PLAN.md;
+  // edge fefa299, 2026-10-06; was refused at the edge, and graded 'gap' before that, F3)
+  await call(G1, 'web3_clientVersion', '', [], is.result((v) => (typeof v === 'string' && v.length > 0) || 'not a client string'));
+  await call(G1, 'web3_sha3', '', ['0x68656c6c6f'],
+    is.result((v) => v === '0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8' || 'wrong keccak of "hello"'));
+  // rpc_*: one node's namespaces, not the endpoint's: refused at the edge (EDGE_METHOD_BLOCKLIST_PLAN.md D2, fefa299)
+  await call(G1, 'rpc_modules', 'refused at the edge', [], is.error('expected', NAMESPACE_REFUSED));
   await call(G1, 'eth_protocolVersion', '', [], is.either);
   await call(G1, 'eth_accounts', '', [], (r) => (Array.isArray(res(r)) && res(r).length === 0 ? ['ok', '[] (no accounts)'] : is.either(r)));
   // proof-of-work leftovers: refused at the edge (EDGE_METHOD_BLOCKLIST_PLAN.md D2)
