@@ -149,13 +149,15 @@ const historyDefaults = {
 // from its fee-history cache; older ranges read every block's receipts, ~0.5 ms/block on reth
 // with receipt_floor 0, ~2-3 on geth, ~3.5-6 on pruned reth (measured 2026-10-30). Heavy
 // requests prefer those node classes in that order (D2); pruned reth never takes more than
-// prunedMaxBlocks (D3); class A is skipped for a node at spillLoad weighted load or more (D5,
-// a placeholder until concurrency is measured).
+// prunedMaxBlocks (D3); a node is skipped at maxLoad weighted load or more for its class (D5).
+// Concurrency test 2026-10-30: class A served 4 parallel 1,024-block requests per node in
+// 0.6-1.2 s; geth timed out on 2-3 at once (5 of 6), so B and C take one at a time.
 const feeHistoryHeavy = {
   minBlocks: 201,     // D1: 201+ blocks = 4+ units in the shared cost table
   cacheBlocks: 1024,  // D1: reth caches 1,124; margin for node heads behind the pool head
   prunedMaxBlocks: 512,
-  spillLoad: 48,      // four 1,024-block requests (12 units each)
+  // D5, in units (a 1,024-block request is 12): A ~6 at once; B and C below one 1,024-block request
+  maxLoad: { A: 72, B: 12, C: 12 },
 };
 
 const heavyInFlightMaxAge = 120000; // Drop in-flight entries (all methods) whose response never came back (ms)

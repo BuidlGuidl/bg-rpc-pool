@@ -581,11 +581,17 @@ describe('heavy eth_feeHistory (FEEHISTORY_ROUTING_PLAN.md)', () => {
     expect(decide(fh(1024, hex(OLD)), none).error.code).toBe(-69000);
   });
 
-  test('D5: class A at spillLoad or more is skipped; geth takes over when all of class A is loaded', () => {
-    const nodes = [archive('a1'), archive('a2'), geth('g')];
-    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 48 } })).toEqual(['ws-a2']);
-    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 48, a2: 60 } })).toEqual(['ws-g']);
-    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 47, a2: 47 } })).toEqual(['ws-a1', 'ws-a2']);
+  test('D5: a node at its class maxLoad is skipped (A 72, B 12, C 12); nothing left → -69000', () => {
+    const nodes = [archive('a1'), archive('a2'), geth('g'), pruned('p')];
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 72 } })).toEqual(['ws-a2']);
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 71, a2: 71 } })).toEqual(['ws-a1', 'ws-a2']);
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 72, a2: 80 } })).toEqual(['ws-g']);
+    // geth takes one at a time; above 512 blocks pruned reth can't help → fallback
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 72, a2: 72, g: 12 } })).toEqual(['error -69000']);
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 72, a2: 72, g: 11 } })).toEqual(['ws-g']);
+    // ≤ 512 blocks: pruned reth is the last class, also one at a time
+    expect(picks(fh(512, hex(OLD)), nodes, { loads: { a1: 72, a2: 72, g: 12 } })).toEqual(['ws-p']);
+    expect(picks(fh(512, hex(OLD)), nodes, { loads: { a1: 72, a2: 72, g: 12, p: 12 } })).toEqual(['error -69000']);
   });
 
   test('retry stays in class A while another fast class-A node is left, then moves down', () => {

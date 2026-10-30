@@ -421,19 +421,22 @@ function selectLight(rpcRequest, profile, snapshot, random) {
 
 /**
  * Node classes for a heavy eth_feeHistory, fastest first (FEEHISTORY_ROUTING_PLAN.md D2), among
- * the nodes whose receipts cover the range: A reth with receipt_floor 0, below spillLoad weighted
- * load (D5); B geth; C reth with a known, non-zero receipt floor, for at most prunedMaxBlocks
- * blocks (D3). Non-reporting reth and other clients hold no receipts by number (utils/history.js).
+ * the nodes whose receipts cover the range: A reth with receipt_floor 0; B geth; C reth with a
+ * known, non-zero receipt floor, for at most prunedMaxBlocks blocks (D3). In each class only nodes
+ * below the class's maxLoad weighted load (D5). Non-reporting reth and other clients hold no
+ * receipts by number (utils/history.js).
  * @returns {Object[] | null} the first class with a fast node, or null when no class has one
  */
 function feeHistoryClass(rpcRequest, nodes, { blocks, start }, loads, timing) {
   const need = { kind: 'receipts', block: start };
+  const { maxLoad } = feeHistoryHeavy;
   const covering = nodes.filter(c => covers(c, need));
+  const below = (name) => (c) => (loads[c.id] || 0) < maxLoad[name];
   const classes = [
-    ['A', covering.filter(c => isReth(c) && c.receipt_floor === 0 && (loads[c.id] || 0) < feeHistoryHeavy.spillLoad)],
-    ['B', covering.filter(isGeth)],
+    ['A', covering.filter(c => isReth(c) && c.receipt_floor === 0).filter(below('A'))],
+    ['B', covering.filter(isGeth).filter(below('B'))],
     ['C', blocks > feeHistoryHeavy.prunedMaxBlocks ? []
-      : covering.filter(c => isReth(c) && Number.isFinite(c.receipt_floor) && c.receipt_floor > 0)],
+      : covering.filter(c => isReth(c) && Number.isFinite(c.receipt_floor) && c.receipt_floor > 0).filter(below('C'))],
   ];
   const chosen = classes.find(([, members]) => members.some(c => isFast(c, timing)));
   console.log(`⛽ ${rpcRequest.method} ${blocks} blocks from ${start}: ` +
