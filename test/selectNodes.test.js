@@ -5,7 +5,7 @@
 const config = require('../config');
 const { setNodeTimingData } = require('../utils/nodeTimingUtils');
 const heavyInFlight = require('../utils/heavyInFlight');
-const { select, takeSnapshot, resolveFromBlock, getHeavyStatus } = require('../utils/selectNodes');
+const { select, takeSnapshot, resolveFromBlock, getHeavyStatus, heavyFeeHistory } = require('../utils/selectNodes');
 const nodeLoad = require('../utils/nodeLoad');
 const { decideLegacy } = require('../utils/routeLegacy');
 
@@ -510,6 +510,109 @@ describe('namespace routing (NAMESPACE_ROUTING_PLAN.md)', () => {
       makeNode('d', { rpc_modules: ['eth', 'net', 'web3'], suspicious: true }),
     ]);
     expect(getNamespaceCounts(pool)).toEqual({ eth: 3, net: 3, web3: 1 });
+  });
+});
+
+describe('heavy eth_feeHistory (FEEHISTORY_ROUTING_PLAN.md)', () => {
+  const OLD = HEAD - 50000; // older than reth's fee-history cache, above every test floor
+  const fh = (count, newest, percentiles = [50]) => ({ jsonrpc: '2.0', id: 1, method: 'eth_feeHistory', params: [count, newest, percentiles] });
+  const archive = (id, o = {}) => makeNode(id, { receipt_floor: 0, ...o });
+  const pruned = (id, o = {}) => makeNode(id, { receipt_floor: 25800000, ...o });
+  const geth = (id, o = {}) => makeNode(id, { execution_client: 'geth v1.17.4', receipt_floor: undefined, ...o });
+  const decide = (request, nodes, flags = {}, seed = 1) =>
+    withSeed(seed, () => select(request, { nodes, timing: null, heavyCounts: {}, loads: {}, ...flags }));
+  const picks = (request, nodes, flags = {}) => {
+    const seen = new Set();
+    for (let s = 0; s < 200; s++) {
+      const d = decide(request, nodes, flags, s);
+      seen.add(d.error ? `error ${d.error.code}` : d.socketIds[0]);
+    }
+    return [...seen].sort();
+  };
+
+  test('D1: percentiles, more than 200 blocks, starting below head - 1,024', () => {
+    expect(heavyFeeHistory(fh('0x400', hex(OLD)), HEAD)).toEqual({ blocks: 1024, start: OLD - 1023 });
+    expect(heavyFeeHistory(fh(201, hex(OLD)), HEAD)).toEqual({ blocks: 201, start: OLD - 200 });
+    expect(heavyFeeHistory(fh('201', hex(OLD)), HEAD)).toEqual({ blocks: 201, start: OLD - 200 }); // decimal string
+    expect(heavyFeeHistory(fh(200, hex(OLD)), HEAD)).toBeNull();
+    expect(heavyFeeHistory(fh(5000, hex(OLD)), HEAD)).toEqual({ blocks: 1024, start: OLD - 1023 }); // reth's cap
+    // Range start exactly head - 1,024 is inside the margin; one block older is heavy
+    expect(heavyFeeHistory(fh(1024, hex(HEAD - 1024 + 1023)), HEAD)).toBeNull();
+    expect(heavyFeeHistory(fh(1024, hex(HEAD - 1025 + 1023)), HEAD)).toEqual({ blocks: 1024, start: HEAD - 1025 });
+    // Not heavy: no percentiles, head tags, unreadable params, no head
+    expect(heavyFeeHistory(fh(1024, hex(OLD), []), HEAD)).toBeNull();
+    expect(heavyFeeHistory({ jsonrpc: '2.0', id: 1, method: 'eth_feeHistory', params: [1024, hex(OLD)] }, HEAD)).toBeNull();
+    for (const tag of ['latest', 'safe', 'finalized', 'pending', 'earliest', undefined, 26000000]) {
+      expect(heavyFeeHistory(fh(1024, tag), HEAD)).toBeNull();
+    }
+    expect(heavyFeeHistory(fh('lots', hex(OLD)), HEAD)).toBeNull();
+    expect(heavyFeeHistory({ jsonrpc: '2.0', id: 1, method: 'eth_feeHistory', params: {} }, HEAD)).toBeNull();
+    expect(heavyFeeHistory(fh(1024, hex(OLD)), null)).toBeNull();
+    // Near genesis only the blocks that exist count
+    expect(heavyFeeHistory(fh(1024, '0x63'), HEAD)).toBeNull(); // 100 blocks
+  });
+
+  test('D2: class A (reth, receipts from 0) first, then geth, then pruned reth', () => {
+    const all = [archive('a1'), archive('a2'), geth('g'), pruned('p')];
+    expect(picks(fh('0x400', hex(OLD)), all)).toEqual(['ws-a1', 'ws-a2']);
+    expect(picks(fh('0x400', hex(OLD)), [geth('g'), pruned('p')])).toEqual(['ws-g']);
+    expect(picks(fh(512, hex(OLD)), [pruned('p1'), pruned('p2')])).toEqual(['ws-p1', 'ws-p2']);
+  });
+
+  test('a slow class-A node does not count; the next class with a fast node serves', () => {
+    const nodes = [archive('a'), geth('g'), pruned('p')];
+    const d = withSeed(1, () => select(fh('0x400', hex(OLD)), { nodes, timing: { a: 0.5 }, heavyCounts: {}, loads: {} }));
+    expect(d.socketIds).toEqual(['ws-g']);
+  });
+
+  test('D3 + Phase 3: no pruned reth above 512 blocks; nothing left → -69000 (proxy falls back)', () => {
+    const d = decide(fh(513, hex(OLD)), [pruned('p1'), pruned('p2')]);
+    expect(d.error.code).toBe(-69000);
+    expect(d.reason).toBe('no fast feeHistory node');
+    expect(decide(fh(1024, hex(OLD)), [pruned('p'), geth('g')]).socketIds).toEqual(['ws-g']);
+  });
+
+  test('nodes that don\'t cover the range never serve it, whatever their class', () => {
+    // Class A with bodies only from 26,040,000: receipts for the range need the bodies too
+    const nodes = [archive('a', { body_floor: 26040000 }), pruned('p', { receipt_floor: 26040000 }), geth('g')];
+    expect(picks(fh(1024, hex(OLD)), nodes)).toEqual(['ws-g']);
+    // Non-reporting reth and nethermind hold no receipts by number: nothing left
+    const none = [makeNode('r', { receipt_floor: undefined }), makeNode('nm', { execution_client: 'nethermind v8.1.2', receipt_floor: undefined })];
+    expect(decide(fh(1024, hex(OLD)), none).error.code).toBe(-69000);
+  });
+
+  test('D5: class A at spillLoad or more is skipped; geth takes over when all of class A is loaded', () => {
+    const nodes = [archive('a1'), archive('a2'), geth('g')];
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 48 } })).toEqual(['ws-a2']);
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 48, a2: 60 } })).toEqual(['ws-g']);
+    expect(picks(fh(1024, hex(OLD)), nodes, { loads: { a1: 47, a2: 47 } })).toEqual(['ws-a1', 'ws-a2']);
+  });
+
+  test('retry stays in class A while another fast class-A node is left, then moves down', () => {
+    const nodes = [archive('a1'), archive('a2'), geth('g'), pruned('p')];
+    expect(decide(fh(1024, hex(OLD)), nodes, { exclude: ['a1'], retry: true }).socketIds).toEqual(['ws-a2']);
+    expect(decide(fh(1024, hex(OLD)), nodes, { exclude: ['a1', 'a2'], retry: true }).socketIds).toEqual(['ws-g']);
+    expect(decide(fh(1024, hex(OLD)), nodes, { exclude: ['a1', 'a2', 'g'], retry: true }).error.code).toBe(-69000);
+    expect(decide(fh(256, hex(OLD)), nodes, { exclude: ['a1', 'a2', 'g'], retry: true }).socketIds).toEqual(['ws-p']);
+  });
+
+  test('exact highest block is taken within the class', () => {
+    const nodes = [archive('a', { block_number: String(HEAD - 1) }), geth('g')];
+    expect(picks(fh(1024, hex(OLD)), nodes)).toEqual(['ws-a']);
+  });
+
+  test('light eth_feeHistory routes as before: small, head tag, recent, or no percentiles', () => {
+    const nodes = [archive('a'), geth('g'), pruned('p')];
+    for (const request of [fh(200, hex(OLD)), fh(1024, 'latest'), fh(1024, hex(HEAD)), fh(1024, hex(OLD), [])]) {
+      expect(picks(request, nodes)).toEqual(['ws-a', 'ws-g', 'ws-p']);
+    }
+  });
+
+  test('cost is unchanged: 1 + ceil(blockCount / 100)', () => {
+    const nodes = [archive('a')];
+    expect(decide(fh('0x400', hex(OLD)), nodes).cost).toBe(12);
+    expect(decide(fh(201, hex(OLD)), nodes).cost).toBe(4);
+    expect(decide(fh(4, 'latest'), nodes).cost).toBe(2);
   });
 });
 

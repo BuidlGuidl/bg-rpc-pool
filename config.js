@@ -144,6 +144,20 @@ const historyDefaults = {
   unknownStateWindow: 127, // geth v1.17.4 (stage, 2026-09-28): state at head - 127 served, head - 128 not
 };
 
+// Heavy eth_feeHistory (bg-rpc-docs FEEHISTORY_ROUTING_PLAN.md): reward percentiles over more
+// than minBlocks blocks starting below head - cacheBlocks. reth serves the last ~1,124 blocks
+// from its fee-history cache; older ranges read every block's receipts, ~0.5 ms/block on reth
+// with receipt_floor 0, ~2-3 on geth, ~3.5-6 on pruned reth (measured 2026-10-30). Heavy
+// requests prefer those node classes in that order (D2); pruned reth never takes more than
+// prunedMaxBlocks (D3); class A is skipped for a node at spillLoad weighted load or more (D5,
+// a placeholder until concurrency is measured).
+const feeHistoryHeavy = {
+  minBlocks: 201,     // D1: 201+ blocks = 4+ units in the shared cost table
+  cacheBlocks: 1024,  // D1: reth caches 1,124; margin for node heads behind the pool head
+  prunedMaxBlocks: 512,
+  spillLoad: 48,      // four 1,024-block requests (12 units each)
+};
+
 const heavyInFlightMaxAge = 120000; // Drop in-flight entries (all methods) whose response never came back (ms)
 
 const pointUpdateInterval = 10000;
@@ -194,6 +208,7 @@ const cacheableMethods = new Map([
 
 module.exports = {
   historyDefaults,
+  feeHistoryHeavy,
   portPoolPublic,
   poolPort,
   wsHeartbeatInterval,

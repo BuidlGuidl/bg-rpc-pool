@@ -1,4 +1,4 @@
-const { spotCheckOnlyThreshold, requestSetChance, slowSpotChecks, defaultMethodProfile, methodProfiles } = require('../config');
+const { spotCheckOnlyThreshold, requestSetChance, slowSpotChecks, defaultMethodProfile, methodProfiles, feeHistoryHeavy } = require('../config');
 const { getNodeTimingData } = require('./nodeTimingUtils');
 const nodeLoad = require('./nodeLoad');
 const { historyNeed, nodeFloor, covers } = require('./history');
@@ -13,6 +13,8 @@ const { historyNeed, nodeFloor, covers } = require('./history');
 //   - a request for an old block goes to nodes whose history covers it, when a fast one does (3c)
 //   - a method outside eth_/net_ goes only to nodes reporting its namespace in rpc_modules
 //     (bg-rpc-docs NAMESPACE_ROUTING_PLAN.md); none → -32601
+//   - a heavy eth_feeHistory goes to the first node class that serves it fast, or to no node
+//     (-69000, so the proxy falls back) (bg-rpc-docs FEEHISTORY_ROUTING_PLAN.md)
 
 const TAGS_AT_HEAD = ['latest', 'safe', 'finalized']; // always above any node's receipt floor
 const DEEPER_MARGIN = 1000; // blocks; a history retry (3c) needs a floor at least this much older
@@ -110,6 +112,35 @@ function requestCost(rpcRequest, profile, head) {
   return 1 + Math.ceil(blocks / 1000);
 }
 
+/**
+ * A heavy eth_feeHistory (FEEHISTORY_ROUTING_PLAN.md D1): reward percentiles over more than
+ * feeHistoryHeavy.minBlocks blocks, starting below head - feeHistoryHeavy.cacheBlocks (older
+ * than reth's fee-history cache, so the node reads every block's receipts). A head tag can't be
+ * heavy: its range ends at the head.
+ * @returns {{ blocks: number, start: number } | null} null = not heavy (or unreadable: the node
+ *   rejects it)
+ */
+function heavyFeeHistory(rpcRequest, head) {
+  const params = Array.isArray(rpcRequest.params) ? rpcRequest.params : [];
+  const [count, newest, percentiles] = params;
+  if (!Array.isArray(percentiles) || percentiles.length === 0 || !Number.isFinite(head)) return null;
+  if (typeof newest !== 'string' || !/^0x[0-9a-fA-F]+$/.test(newest)) return null;
+  const newestBlock = parseInt(newest, 16);
+  const n = toCount(count);
+  if (n === null) return null;
+  // reth reads at most 1,024 blocks, and none before genesis
+  const blocks = Math.min(n, MAX_FEE_HISTORY_BLOCKS, newestBlock + 1);
+  const start = newestBlock - blocks + 1;
+  if (blocks < feeHistoryHeavy.minBlocks || start >= head - feeHistoryHeavy.cacheBlocks) return null;
+  return { blocks, start };
+}
+
+// Highest block among checked-in nodes: the pool head
+function poolHead(nodes) {
+  const heads = nodes.filter(c => isCheckedIn(c) && hasValidBlock(c)).map(c => parseInt(c.block_number));
+  return heads.length > 0 ? Math.max(...heads) : null;
+}
+
 function hasValidBlock(client) {
   const blockNum = client.block_number;
   return blockNum !== undefined && blockNum !== null && blockNum !== "N/A" && !isNaN(parseInt(blockNum));
@@ -127,6 +158,7 @@ function isCheckedIn(client) {
 }
 
 const isReth = (c) => typeof c.execution_client === 'string' && c.execution_client.startsWith('reth');
+const isGeth = (c) => typeof c.execution_client === 'string' && c.execution_client.startsWith('geth');
 
 function isFast(client, timing) {
   if (!timing || !client.id || client.id === "N/A") return true;
@@ -205,10 +237,7 @@ function select(rpcRequest, snapshot) {
   const decision = profile.heavy
     ? selectHeavy(rpcRequest, profile, snapshot, random)
     : selectLight(rpcRequest, profile, snapshot, random);
-  if (!decision.error) {
-    const heads = snapshot.nodes.filter(c => isCheckedIn(c) && hasValidBlock(c)).map(c => parseInt(c.block_number));
-    decision.cost = requestCost(rpcRequest, profile, heads.length > 0 ? Math.max(...heads) : null);
-  }
+  if (!decision.error) decision.cost = requestCost(rpcRequest, profile, poolHead(snapshot.nodes));
   return decision;
 }
 
@@ -314,6 +343,20 @@ function selectLight(rpcRequest, profile, snapshot, random) {
     }
   }
 
+  // Heavy eth_feeHistory (FEEHISTORY_ROUTING_PLAN.md Phase 2): only the first node class that
+  // has a fast node; none → -69000, which the proxy sends to the fallback (Phase 3)
+  const feeHistory = profile.cost === 'feeHistory' ? heavyFeeHistory(rpcRequest, poolHead(snapshot.nodes)) : null;
+  if (feeHistory) {
+    const chosen = feeHistoryClass(rpcRequest, clientsWithBlocks, feeHistory, loads, timing);
+    if (!chosen) {
+      return {
+        error: { code: -69000, message: `${rpcRequest.method}: no node can serve ${feeHistory.blocks} blocks of reward history quickly` },
+        reason: 'no fast feeHistory node',
+      };
+    }
+    clientsWithBlocks = chosen;
+  }
+
   const fastNodes = clientsWithBlocks.filter(c => isFast(c, timing));
   if (fastNodes.length === 0) return { ...noClients, reason: 'only slow nodes' }; // D13
 
@@ -377,6 +420,29 @@ function selectLight(rpcRequest, profile, snapshot, random) {
 }
 
 /**
+ * Node classes for a heavy eth_feeHistory, fastest first (FEEHISTORY_ROUTING_PLAN.md D2), among
+ * the nodes whose receipts cover the range: A reth with receipt_floor 0, below spillLoad weighted
+ * load (D5); B geth; C reth with a known, non-zero receipt floor, for at most prunedMaxBlocks
+ * blocks (D3). Non-reporting reth and other clients hold no receipts by number (utils/history.js).
+ * @returns {Object[] | null} the first class with a fast node, or null when no class has one
+ */
+function feeHistoryClass(rpcRequest, nodes, { blocks, start }, loads, timing) {
+  const need = { kind: 'receipts', block: start };
+  const covering = nodes.filter(c => covers(c, need));
+  const classes = [
+    ['A', covering.filter(c => isReth(c) && c.receipt_floor === 0 && (loads[c.id] || 0) < feeHistoryHeavy.spillLoad)],
+    ['B', covering.filter(isGeth)],
+    ['C', blocks > feeHistoryHeavy.prunedMaxBlocks ? []
+      : covering.filter(c => isReth(c) && Number.isFinite(c.receipt_floor) && c.receipt_floor > 0)],
+  ];
+  const chosen = classes.find(([, members]) => members.some(c => isFast(c, timing)));
+  console.log(`⛽ ${rpcRequest.method} ${blocks} blocks from ${start}: ` +
+    classes.map(([name, members]) => `${name} ${members.length} (${members.filter(c => isFast(c, timing)).length} fast)`).join(', ') +
+    ` → ${chosen ? `class ${chosen[0]}` : 'none, fallback'}`);
+  return chosen ? chosen[1] : null;
+}
+
+/**
  * Readiness summary for /getlogsStatus: a ready node is a checked-in reth node with a known
  * receipt floor. receiptFloor is the LOWEST floor among them: the oldest block any ready node
  * can serve. The edge rejects only ranges below it; selection then keeps just the nodes whose
@@ -412,4 +478,4 @@ function getNamespaceCounts(poolMap) {
   return counts;
 }
 
-module.exports = { select, takeSnapshot, getProfile, resolveFromBlock, requestCost, powerOfTwo, getHeavyStatus, getNamespaceCounts };
+module.exports = { select, takeSnapshot, getProfile, resolveFromBlock, requestCost, heavyFeeHistory, powerOfTwo, getHeavyStatus, getNamespaceCounts };
